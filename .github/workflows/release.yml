@@ -1,0 +1,48 @@
+name: Build and Release EngHub Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Grant execute permission for gradlew
+        run: git update-index --chmod=+x gradlew || true
+        shell: bash
+
+      - name: Run Unit Tests
+        run: ./gradlew.bat test
+
+      - name: Build Windows Distributable & UberJar
+        run: ./gradlew.bat createDistributable packageUberJarForCurrentOS
+
+      - name: Archive Windows Application
+        run: |
+          Compress-Archive -Path "build/compose/binaries/main/app/EngHub/*" -DestinationPath "EngHub-windows-x64.zip"
+          Copy-Item -Path "build/compose/jars/EngHub-windows-x64-1.0.0.jar" -Destination "EngHub.jar"
+        shell: pwsh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            EngHub-windows-x64.zip
+            EngHub.jar
+          generate_release_notes: true

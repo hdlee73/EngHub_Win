@@ -1,0 +1,17 @@
+# Gradle
+.gradle/
+build/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Binaries / Large files not committed directly to git
+release/*.zip
+release/*.jar
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
