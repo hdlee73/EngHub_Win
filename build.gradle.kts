@@ -22,6 +22,14 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
 }
 
+// One place for the app version; also written to app.properties, which the app reads for the info dialog and the update check.
+val appVersion = "1.32.0"
+
+tasks.processResources {
+    inputs.property("appVersion", appVersion)
+    filesMatching("app.properties") { expand(mapOf("appVersion" to appVersion)) }
+}
+
 compose.desktop {
     application {
         mainClass = "com.hdlee73.englishstudy.MainKt"
@@ -35,10 +43,20 @@ compose.desktop {
             )
             includeAllModules = true
             packageName = "EngHub"
-            packageVersion = "1.0.0"
+            packageVersion = appVersion
             description = "EngHub Windows English Study Application"
             copyright = "© 2026 hdlee73. All rights reserved."
             vendor = "hdlee73"
+            windows {
+                iconFile.set(project.file("packaging/icon.ico"))
+                menuGroup = "EngHub"
+                shortcut = true
+                menu = true
+                dirChooser = true
+                perUserInstall = true
+                // A fixed id lets a newer installer replace the installed version (auto-update).
+                upgradeUuid = "6f1f4b6e-3b0d-4a49-9a7e-2f0d7c6a1e11"
+            }
         }
     }
 }

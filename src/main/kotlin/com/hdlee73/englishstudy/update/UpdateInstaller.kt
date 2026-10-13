@@ -1,10 +1,6 @@
 package com.hdlee73.englishstudy.update
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
-import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -13,20 +9,20 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
- * Downloads the APK of a newer release inside the app and opens the system installer on it.
- * Android never lets an app install silently, so the user still taps "Install" once.
+ * Downloads the Windows installer (.msi) of a newer release inside the app and runs it. The installer replaces the installed
+ * version (same upgrade id), so the user only confirms once; EngHub closes itself first so no file is in use.
  */
 object UpdateInstaller {
     private val client by lazy { OkHttpClient.Builder().callTimeout(10, TimeUnit.MINUTES).readTimeout(60, TimeUnit.SECONDS).build() }
 
     private fun dir(context: Context) = File(context.cacheDir, "updates").apply { mkdirs() }
 
-    /** Downloads the release APK; [onProgress] gets 0..1 (or -1 when the size is unknown). Throws on failure. */
+    /** Downloads the release installer; [onProgress] gets 0..1 (or -1 when the size is unknown). Throws on failure. */
     suspend fun download(context: Context, release: UpdateChecker.Release, onProgress: (Float) -> Unit): File = withContext(Dispatchers.IO) {
-        val url = release.apkUrl ?: error("이 릴리스에는 APK 파일이 없어요")
+        val url = release.apkUrl ?: error("이 릴리스에는 설치 파일(.msi)이 없어요")
         val folder = dir(context)
         folder.listFiles()?.forEach { it.delete() }
-        val target = File(folder, "EngHub-${release.version}.apk")
+        val target = File(folder, "EngHub-${release.version.removePrefix("v")}.msi")
         val partial = File(folder, "download.part")
         client.newCall(Request.Builder().url(url).build()).execute().use { response ->
             if (!response.isSuccessful) error("다운로드에 실패했어요 (${response.code})")
@@ -51,22 +47,17 @@ object UpdateInstaller {
         target
     }
 
-    fun canInstall(context: Context): Boolean = context.packageManager.canRequestPackageInstalls()
+    /** Windows needs no special permission to run an installer. */
+    fun canInstall(@Suppress("UNUSED_PARAMETER") context: Context): Boolean = true
 
-    /** Opens the system settings page where the user allows EngHub to install apps (first time only). */
-    fun openInstallPermissionSettings(context: Context) {
-        context.startActivity(
-            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
-    }
+    fun openInstallPermissionSettings(@Suppress("UNUSED_PARAMETER") context: Context) {}
 
-    /** Opens the system installer on the downloaded APK. */
-    fun install(context: Context, apk: File) {
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apk)
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, "application/vnd.android.package-archive")
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
+    /** Starts the installer (it shows its own progress) and ends the app so the old files can be replaced. */
+    fun install(@Suppress("UNUSED_PARAMETER") context: Context, msi: File) {
+        ProcessBuilder("msiexec", "/i", msi.absolutePath, "/passive").start()
+        Thread {
+            Thread.sleep(800)
+            System.exit(0)
+        }.start()
     }
 }

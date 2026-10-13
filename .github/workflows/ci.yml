@@ -78,6 +78,9 @@ jobs:
           path: launch.png
           if-no-files-found: ignore
 
+      - name: Build MSI installer (packaging check)
+        run: ./gradlew.bat packageMsi --no-daemon
+
       - name: Zip test build
         shell: pwsh
         run: Compress-Archive -Path "build/compose/binaries/main/app/EngHub/*" -DestinationPath "EngHub-windows-x64-test.zip"

@@ -25,8 +25,8 @@ import java.util.concurrent.TimeUnit
  * notification (once per new version) and a notice in the app info dialog. Runs when the app opens and once a day.
  */
 object UpdateChecker {
-    private const val API = "https://api.github.com/repos/hdlee73/EngHub/releases/latest"
-    const val RELEASES_URL = "https://github.com/hdlee73/EngHub/releases"
+    private const val API = "https://api.github.com/repos/hdlee73/EngHub_Win/releases/latest"
+    const val RELEASES_URL = "https://github.com/hdlee73/EngHub_Win/releases"
     private const val WORK = "update_check"
     private const val PREFS = "update_check"
     private const val KEY_VERSION = "latest_version"
@@ -77,10 +77,11 @@ object UpdateChecker {
         val tag = json.optString("tag_name")
         if (tag.isBlank() || json.optBoolean("draft") || json.optBoolean("prerelease")) return@withContext available(context)
         val assets = json.optJSONArray("assets")
+        // The Windows installer (.msi) is what the in-app update downloads and runs.
         var apk: String? = null
         if (assets != null) for (i in 0 until assets.length()) {
             val a = assets.optJSONObject(i) ?: continue
-            if (a.optString("name").endsWith(".apk")) { apk = a.optString("browser_download_url").ifBlank { null }; break }
+            if (a.optString("name").endsWith(".msi", ignoreCase = true)) { apk = a.optString("browser_download_url").ifBlank { null }; break }
         }
         prefs(context).edit().putString(KEY_VERSION, tag).putString(KEY_URL, json.optString("html_url").ifBlank { RELEASES_URL })
             .putString(KEY_APK, apk).apply()

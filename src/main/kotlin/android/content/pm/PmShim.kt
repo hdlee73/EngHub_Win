@@ -2,10 +2,20 @@ package android.content.pm
 
 import android.content.Intent
 
+/** The app version written into app.properties by the Gradle build (build.gradle.kts: appVersion). */
+object AppVersion {
+    val name: String by lazy {
+        runCatching {
+            AppVersion::class.java.getResourceAsStream("/app.properties")?.use { java.util.Properties().apply { load(it) }.getProperty("version") }
+        }.getOrNull()?.takeIf { it.isNotBlank() && !it.contains("$") } ?: "0"
+    }
+}
+
 class PackageInfo {
-    var versionName: String = "1.31.1"
-    var versionCode: Int = 57
-    var longVersionCode: Long = 57L
+    var versionName: String = AppVersion.name
+    /** 1.32.0 -> 13200: only has to differ between versions (cached databases are keyed on it). */
+    var versionCode: Int = AppVersion.name.split('.').map { it.toIntOrNull() ?: 0 }.let { (it.getOrElse(0) { 0 } * 10000 + it.getOrElse(1) { 0 } * 100 + it.getOrElse(2) { 0 }) }
+    var longVersionCode: Long = versionCode.toLong()
 }
 
 class ResolveInfo

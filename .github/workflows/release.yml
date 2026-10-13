@@ -30,12 +30,18 @@ jobs:
         run: ./gradlew.bat test
 
       - name: Build Windows Distributable & UberJar
-        run: ./gradlew.bat createDistributable packageUberJarForCurrentOS
+        run: ./gradlew.bat createDistributable packageMsi
 
-      - name: Archive Windows Application
+      - name: Collect release files
         run: |
-          Compress-Archive -Path "build/compose/binaries/main/app/EngHub/*" -DestinationPath "EngHub-windows-x64.zip"
-          Copy-Item -Path "build/compose/jars/EngHub-windows-x64-1.0.0.jar" -Destination "EngHub.jar"
+          $version = (Select-String -Path build.gradle.kts -Pattern 'val appVersion = "([^"]+)"').Matches[0].Groups[1].Value
+          Compress-Archive -Path "build/compose/binaries/main/app/EngHub/*" -DestinationPath "EngHub-windows-x64-$version.zip"
+          $msi = Get-ChildItem -Path build/compose/binaries/main/msi -Filter *.msi | Select-Object -First 1
+          Copy-Item -Path $msi.FullName -Destination "EngHub-windows-x64-$version.msi"
+          # Release body = only the newest section of RELEASE_NOTES.md.
+          $n = 0; $out = @()
+          foreach ($line in Get-Content RELEASE_NOTES.md) { if ($line -like '## *') { $n++ }; if ($n -eq 1) { $out += $line } }
+          Set-Content -Path release-notes.md -Value $out -Encoding utf8
         shell: pwsh
 
       - name: Create GitHub Release
@@ -43,6 +49,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            EngHub-windows-x64.zip
-            EngHub.jar
-          generate_release_notes: true
+            EngHub-windows-x64-*.msi
+            EngHub-windows-x64-*.zip
+          body_path: release-notes.md
