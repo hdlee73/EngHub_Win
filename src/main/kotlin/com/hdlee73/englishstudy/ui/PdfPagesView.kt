@@ -1,0 +1,250 @@
+package com.hdlee73.englishstudy.ui
+
+import android.content.Context
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntSize
+import com.hdlee73.englishstudy.reading.PdfPageText
+import com.hdlee73.englishstudy.reading.PdfTextSource
+import com.hdlee73.englishstudy.reading.ReadingWords
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.rendering.PDFRenderer
+import java.io.File
+import java.util.LinkedHashMap
+import kotlin.math.roundToInt
+
+/** The pages of a PDF file as they are (PDFBox PDFRenderer), one under the other, with pinch zoom and the last page remembered. */
+private class PdfHolder(file: File) {
+    private val lock = Mutex()
+    private val doc: PDDocument = PDDocument.load(file)
+    private val renderer = PDFRenderer(doc)
+    val pageCount: Int = doc.numberOfPages
+    private var closed = false
+    private val cache = object : LinkedHashMap<String, ImageBitmap>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?): Boolean = size > 12
+    }
+
+    /** Height / width of every page. */
+    suspend fun aspects(): List<Float> = withContext(Dispatchers.IO) {
+        lock.withLock {
+            List(pageCount) { i ->
+                if (closed) return@List 1.414f
+                val box = doc.getPage(i).cropBox
+                box.height / box.width.coerceAtLeast(1f)
+            }
+        }
+    }
+
+    suspend fun render(index: Int, widthPx: Int): ImageBitmap? = withContext(Dispatchers.IO) {
+        val key = "$index@$widthPx"
+        lock.withLock {
+            cache[key]?.let { return@withLock it }
+            if (closed) return@withLock null
+            runCatching {
+                val box = doc.getPage(index).cropBox
+                val scale = (widthPx.toFloat() / box.width.coerceAtLeast(1f)).coerceIn(0.5f, 4f)
+                val img = renderer.renderImage(index, scale).toComposeImageBitmap()
+                cache[key] = img
+                img
+            }.getOrNull()
+        }
+    }
+
+    fun close() {
+        closed = true
+        runCatching { doc.close() }
+        cache.clear()
+    }
+}
+
+private fun rememberedPage(context: Context, path: String): Int =
+    runCatching { context.getSharedPreferences("reading", Context.MODE_PRIVATE).getInt("pdf_page_" + File(path).name, 0) }.getOrDefault(0)
+
+private fun rememberPage(context: Context, path: String, page: Int) {
+    runCatching { context.getSharedPreferences("reading", Context.MODE_PRIVATE).edit().putInt("pdf_page_" + File(path).name, page).apply() }
+}
+
+/** A word, phrase or sentence picked on a page of the original PDF. [text] is what is looked up and read; [sentence] is the sentence around it. */
+class PdfSelection(val page: Int, val range: IntRange, val text: String, val sentence: String)
+
+@Composable
+fun PdfPagesView(path: String, selection: PdfSelection?, onSelection: (PdfSelection?) -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val textSource = remember(path) { PdfTextSource(context.applicationContext, File(path)) }
+    DisposableEffect(path) { onDispose { textSource.close() } }
+    val latestSelection by rememberUpdatedState(onSelection)
+    val holder = remember(path) { runCatching { PdfHolder(File(path)) } }
+    DisposableEffect(path) { onDispose { holder.getOrNull()?.close() } }
+    val pdf = holder.getOrNull()
+    if (pdf == null || pdf.pageCount == 0) {
+        Box(modifier, contentAlignment = Alignment.Center) {
+            Text("이 PDF를 열지 못했어요. 암호가 걸렸거나 손상된 파일일 수 있어요. ‘글자 모드’로 읽어 보세요.", color = Muted, fontSize = 14.sp, modifier = Modifier.padding(24.dp))
+        }
+        return
+    }
+    val aspects by produceState<List<Float>?>(null, pdf) { value = pdf.aspects() }
+    val ratios = aspects
+    BoxWithConstraints(modifier.background(Color(0xFFE9ECF2))) {
+        val widthPx = constraints.maxWidth
+        val density = LocalDensity.current
+        var zoom by remember(path) { mutableStateOf(1f) }
+        // The bitmaps are made again at the new size a moment after the pinch ends; until then the old ones are stretched.
+        var renderZoom by remember(path) { mutableStateOf(1f) }
+        LaunchedEffect(zoom) { delay(300); renderZoom = zoom }
+        val listState = rememberLazyListState(rememberedPage(context, path).coerceIn(0, pdf.pageCount - 1))
+        val current by remember { derivedStateOf { listState.firstVisibleItemIndex } }
+        LaunchedEffect(current) { rememberPage(context, path, current) }
+        val pageWidthDp = with(density) { (widthPx * zoom).toDp() }
+        Box(Modifier.fillMaxSize().pinchZoom({ zoom }) { zoom = it }.horizontalScroll(rememberScrollState(), enabled = zoom > 1.01f)) {
+            LazyColumn(
+                state = listState, modifier = Modifier.width(pageWidthDp).fillMaxSize(),
+                // Room under the last page so the selection panel never covers it.
+                contentPadding = PaddingValues(bottom = if (selection != null) 260.dp else 0.dp)
+            ) {
+                itemsIndexed(List(pdf.pageCount) { it }) { index, _ ->
+                    val ratio = ratios?.getOrNull(index) ?: 1.414f
+                    val bitmap by produceState<ImageBitmap?>(null, index, renderZoom) {
+                        val target = (widthPx * renderZoom * 1.4f).roundToInt().coerceIn(200, 3000)
+                        value = pdf.render(index, target)
+                    }
+                    Box(
+                        Modifier.fillMaxWidth().padding(vertical = 3.dp).height(with(density) { (widthPx * zoom * ratio).toDp() }).background(Color.White),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val image = bitmap
+                        if (image != null) Image(image, "${index + 1}쪽", Modifier.fillMaxSize(), contentScale = ContentScale.FillWidth)
+                        else Text("${index + 1}쪽", color = Muted, fontSize = 13.sp)
+                        PageTextLayer(index, textSource, selection?.takeIf { it.page == index }?.range) { latestSelection(it) }
+                    }
+                }
+            }
+        }
+        Text(
+            "${current + 1} / ${pdf.pageCount}쪽" + if (zoom > 1.01f) " · ${(zoom * 100).roundToInt()}%" else "",
+            color = Color.White, fontSize = 12.sp,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xCC1B2333)).padding(horizontal = 12.dp, vertical = 5.dp)
+        )
+        if (zoom > 1.01f) TextButton(
+            onClick = { zoom = 1f },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 6.dp, bottom = 4.dp)
+        ) { Text("원래대로", fontSize = 12.sp) }
+    }
+}
+
+/**
+ * A see-through layer over one page: tap a word, double-tap a sentence, or long-press and drag across words. The words come
+ * from the text inside the PDF, so a scanned page (only a picture) has nothing to select.
+ */
+@Composable
+private fun PageTextLayer(index: Int, source: PdfTextSource, highlight: IntRange?, onSelect: (PdfSelection?) -> Unit) {
+    val layer by produceState<PdfPageText?>(null, index, source) { value = source.page(index) }
+    val page = layer
+    val latestLayer by rememberUpdatedState(page)
+    val latestSelect by rememberUpdatedState(onSelect)
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
+
+    fun pick(range: IntRange?) {
+        val text = latestLayer?.text
+        if (range == null || text == null || range.last >= text.length) { latestSelect(null); return }
+        val shown = text.substring(range.first, range.last + 1).replace(Regex("\\s+"), " ").trim()
+        if (shown.isEmpty()) { latestSelect(null); return }
+        val sentenceRange = ReadingWords.sentenceRange(text, range.first)
+        val sentence = sentenceRange?.let { text.substring(it.first, minOf(it.last + 1, text.length)) }.orEmpty().replace(Regex("\\s+"), " ").trim()
+        latestSelect(PdfSelection(index, range, shown, sentence))
+    }
+
+    fun wordRange(position: Offset): IntRange? {
+        val l = latestLayer ?: return null
+        if (boxSize.width == 0 || boxSize.height == 0) return null
+        return l.wordAt(position.x / boxSize.width, position.y / boxSize.height)?.let { l.rangeOf(it) }
+    }
+
+    Box(
+        Modifier.fillMaxSize()
+            .onSizeChanged { boxSize = it }
+            .pointerInput(index) {
+                detectTapGestures(
+                    onDoubleTap = { position ->
+                        val l = latestLayer
+                        val word = l?.wordAt(position.x / boxSize.width, position.y / boxSize.height)
+                        if (l != null && word != null) pick(ReadingWords.sentenceRange(l.text, word.start)) else pick(null)
+                    },
+                    onTap = { position -> pick(wordRange(position)) }
+                )
+            }
+            .pointerInput(index) {
+                var anchor: IntRange? = null
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { position -> anchor = wordRange(position); pick(anchor) },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        val start = anchor
+                        val here = wordRange(change.position)
+                        if (start != null && here != null) pick(ReadingWords.span(start, here))
+                    }
+                )
+            }
+    ) {
+        val l = page
+        if (l != null && highlight != null) Canvas(Modifier.fillMaxSize()) {
+            l.words.forEach { w ->
+                if (w.start <= highlight.last && w.end - 1 >= highlight.first) {
+                    drawRect(
+                        Color(0x66FFC107),
+                        topLeft = Offset(w.left * this.size.width, w.top * this.size.height),
+                        size = Size((w.right - w.left) * this.size.width, (w.bottom - w.top) * this.size.height)
+                    )
+                }
+            }
+        }
+    }
+}

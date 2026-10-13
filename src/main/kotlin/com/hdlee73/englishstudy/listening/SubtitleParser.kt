@@ -1,5 +1,10 @@
 package com.hdlee73.englishstudy.listening
 
+import com.hdlee73.englishstudy.R
+
+import android.content.Context
+import android.net.Uri
+
 data class Cue(val startMs: Long, val endMs: Long, val text: String)
 
 /** Reads .srt / .vtt (timed blocks) and .lrc (one timestamp per line) subtitle files. */
@@ -10,12 +15,20 @@ object SubtitleParser {
     )
     private val lrcLine = Regex("""^\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]\s*(.*)$""")
     private val tags = Regex("""<[^>]+>|\{\\[^\}]*\}""")
-    private val blockSplit = Regex("""\r?\n\s*\r?\n""")
+    private val blockSplit = Regex("""\n\s*\n""")
     private val spaces = Regex("""\s+""")
 
+    /** Returns null when the file cannot be read; an empty list when nothing in it looks like subtitles. */
+    fun load(context: Context, uri: String): List<Cue>? {
+        val raw = runCatching {
+            context.contentResolver.openInputStream(Uri.parse(uri))?.use { it.readBytes() }
+        }.getOrNull() ?: return null
+        return runCatching { parse(String(raw, Charsets.UTF_8).removePrefix(BOM)) }.getOrNull()
+    }
+
     fun parse(text: String): List<Cue> {
-        val clean = text.removePrefix(BOM).replace("\r\n", "\n").replace('\r', '\n')
-        return if (clean.contains("-->")) parseTimed(clean) else parseLrc(clean)
+        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+        return if (normalized.contains("-->")) parseTimed(normalized) else parseLrc(normalized)
     }
 
     private fun ms(hours: String, minutes: String, seconds: String, fraction: String): Long {

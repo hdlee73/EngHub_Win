@@ -1,0 +1,646 @@
+package com.hdlee73.englishstudy
+
+import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.ClipboardManager
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.view.KeyEvent
+import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import com.hdlee73.englishstudy.dictionary.DictionaryViewModel
+import com.hdlee73.englishstudy.dictionary.ExportWorker
+import com.hdlee73.englishstudy.dictionary.WordSpeaker
+import com.hdlee73.englishstudy.docvoice.DocVoiceLink
+import com.hdlee73.englishstudy.docvoice.DocVoiceViewModel
+import com.hdlee73.englishstudy.docvoice.ui.DocVoiceScreen
+import com.hdlee73.englishstudy.listening.ListeningLink
+import com.hdlee73.englishstudy.listening.ListeningScreen
+import com.hdlee73.englishstudy.reading.ReadingViewModel
+import com.hdlee73.englishstudy.translate.TranslateViewModel
+import com.hdlee73.englishstudy.ui.TranslateScreen
+import com.hdlee73.englishstudy.speaking.LearningViewModel
+import com.hdlee73.englishstudy.speaking.model.LearningMode
+import com.hdlee73.englishstudy.speaking.model.LessonPhase
+import com.hdlee73.englishstudy.speaking.model.RecognitionStrictness
+import com.hdlee73.englishstudy.speaking.model.VoiceAccent
+import com.hdlee73.englishstudy.speaking.speech.RetryEvaluator
+import com.hdlee73.englishstudy.speaking.speech.SpeechEngine
+import com.hdlee73.englishstudy.speaking.ui.SpeakFlowApp
+import com.hdlee73.englishstudy.study.SavedWordSentences
+import com.hdlee73.englishstudy.study.StudyViewModel
+import com.hdlee73.englishstudy.ui.AppRoot
+import com.hdlee73.englishstudy.ui.AppTab
+import com.hdlee73.englishstudy.ui.DictionaryScreen
+import com.hdlee73.englishstudy.ui.FlashcardScreen
+import com.hdlee73.englishstudy.ui.QuizScreen
+import com.hdlee73.englishstudy.ui.ReadingScreen
+
+class MainActivity : AppCompatActivity() {
+    private val learningVm: LearningViewModel by viewModels()
+    private val dictionaryVm: DictionaryViewModel by viewModels()
+    private val studyVm: StudyViewModel by viewModels()
+    private val readingVm: ReadingViewModel by viewModels()
+    private val translateVm: TranslateViewModel by viewModels()
+    private val docVoiceVm: DocVoiceViewModel by viewModels()
+    private lateinit var speech: SpeechEngine
+    private lateinit var wordSpeaker: WordSpeaker
+
+    private var currentTab = AppTab.DICTIONARY
+    /** An audio file opened from elsewhere, or a widget / notification tap: the Listening tab takes it over. */
+    private var listeningIntent by mutableStateOf<Intent?>(null)
+    /** Bumped when a DocVoice notification is tapped, so the DocVoice tab comes to the front. */
+    private var docVoiceRequest by mutableStateOf(0)
+    private var hasOpenDialog = false
+    /** A word sent by another app (Everynote's 단어장): the dictionary tab searches it and offers a way back to [returnPackage]. */
+    private data class ExternalLookup(val word: String, val returnPackage: String?, val serial: Long = System.nanoTime())
+    private var externalLookup by mutableStateOf<ExternalLookup?>(null)
+
+    /** Text selected in another app (or shared to EngHub): the app asks whether to look it up or translate it. */
+    private var sharedText by mutableStateOf<String?>(null)
+
+    private fun readSharedText(intent: Intent?) {
+        val text = when (intent?.action) {
+            Intent.ACTION_PROCESS_TEXT -> intent.getStringExtra(Intent.EXTRA_PROCESS_TEXT)
+            Intent.ACTION_SEND ->
+                if (DocVoiceLink.sharedYoutubeUrl(intent) == null) intent.getStringExtra(Intent.EXTRA_TEXT)?.takeUnless { it.trim().startsWith("http") } else null
+            else -> null
+        }?.trim()?.take(2000)
+        if (!text.isNullOrEmpty()) sharedText = text
+    }
+
+    private fun readExternalLookup(intent: Intent?) {
+        val word = intent?.getStringExtra(EXTRA_LOOKUP_WORD)?.trim().orEmpty()
+        if (word.isEmpty()) return
+        externalLookup = ExternalLookup(word, intent?.getStringExtra(EXTRA_RETURN_PACKAGE))
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        if (savedInstanceState == null && ListeningLink.isForListening(intent)) listeningIntent = intent
+        if (savedInstanceState == null) DocVoiceLink.sharedYoutubeUrl(intent)?.let(docVoiceVm::openYoutube)
+        if (savedInstanceState == null && DocVoiceLink.isForDocVoice(intent)) docVoiceRequest++
+        if (savedInstanceState == null) readExternalLookup(intent)
+        if (savedInstanceState == null) readSharedText(intent)
+        // Fetches each new BBC 6 Minute English episode into the Listening tab's "6min" folder.
+        com.hdlee73.englishstudy.listening.SixMinuteEnglish.schedule(applicationContext)
+        // Tells the user (notification and app info) when GitHub has a newer release.
+        com.hdlee73.englishstudy.update.UpdateChecker.schedule(applicationContext)
+        if (savedInstanceState == null) lifecycleScope.launch { com.hdlee73.englishstudy.update.UpdateChecker.checkAndNotify(applicationContext) }
+        wordSpeaker = WordSpeaker(this) { notice(it) }
+        speech = SpeechEngine(
+            context = this,
+            onPromptFinished = learningVm::onPromptFinished,
+            onRecognizerReady = learningVm::onRecognizerReady,
+            onPartialResult = learningVm::onPartialRecognition,
+            onResult = learningVm::onRecognition,
+            onUnavailable = learningVm::onRecognitionUnavailable,
+            onBluetoothDevicesChanged = learningVm::onBluetoothDevicesChanged,
+            onNotice = learningVm::showMessage,
+            recordingTee = learningVm::onAudioChunk,
+            isRecording = learningVm::isRecording,
+            onInputDeviceChanged = learningVm::onMicrophoneChanged
+        )
+        setContent {
+            val learning by learningVm.state.collectAsStateWithLifecycle()
+            val dictionary by dictionaryVm.state.collectAsStateWithLifecycle()
+            val saved by dictionaryVm.savedWords.collectAsStateWithLifecycle()
+            val flash by studyVm.flashcards.collectAsStateWithLifecycle()
+            val quiz by studyVm.quiz.collectAsStateWithLifecycle()
+            val reading by readingVm.state.collectAsStateWithLifecycle()
+            val translation by translateVm.state.collectAsStateWithLifecycle()
+
+            var tabIndex by rememberSaveable { mutableStateOf(0) }
+            // The tab a dictionary lookup was started from, so the dictionary can offer a way back to it.
+            var returnTab by rememberSaveable { mutableStateOf<Int?>(null) }
+            // Modification (3): Timestamp in Listening to seek & resume when returning from Dictionary word lookup.
+            var returnListeningPositionMs by rememberSaveable { mutableStateOf<Long?>(null) }
+            // The package of the app that sent the word being looked up; the dictionary shows a "돌아가기" bar for it.
+            var returnApp by rememberSaveable { mutableStateOf<String?>(null) }
+            LaunchedEffect(externalLookup) {
+                val lookup = externalLookup ?: return@LaunchedEffect
+                if (tabIndex == AppTab.SPEAKING.ordinal) {
+                    learningVm.pauseForBackground()
+                    speech.stop()
+                }
+                returnTab = null
+                returnApp = lookup.returnPackage?.takeIf { it.isNotBlank() }
+                tabIndex = AppTab.DICTIONARY.ordinal
+                dictionaryVm.lookupExternal(lookup.word)
+                externalLookup = null
+            }
+            LaunchedEffect(docVoiceRequest) {
+                if (docVoiceRequest > 0) {
+                    if (tabIndex == AppTab.SPEAKING.ordinal) {
+                        learningVm.pauseForBackground()
+                        speech.stop()
+                    }
+                    tabIndex = AppTab.DOCVOICE.ordinal
+                }
+            }
+            LaunchedEffect(listeningIntent) {
+                if (listeningIntent != null) {
+                    if (tabIndex == AppTab.SPEAKING.ordinal) {
+                        learningVm.pauseForBackground()
+                        speech.stop()
+                    }
+                    tabIndex = AppTab.LISTENING.ordinal
+                }
+            }
+            val tab = AppTab.values()[tabIndex.coerceIn(0, AppTab.values().size - 1)]
+            var settingsOpen by rememberSaveable { mutableStateOf(false) }
+            var datasetsOpen by rememberSaveable { mutableStateOf(false) }
+            var bluetoothPermissionRequested by rememberSaveable { mutableStateOf(false) }
+            var exportFormat by rememberSaveable { mutableStateOf(1) }
+            SideEffect {
+                currentTab = tab
+                hasOpenDialog = settingsOpen || datasetsOpen || learning.editingDataset != null
+            }
+
+            val filePicker = rememberLauncherForActivityResult(com.hdlee73.englishstudy.ui.FilePick.Multiple()) { uris ->
+                learningVm.importDatasets(uris)
+            }
+            val audioPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+                val microphoneGranted = grants[Manifest.permission.RECORD_AUDIO]
+                    ?: (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+                if (microphoneGranted) learningVm.retryListening()
+                else learningVm.onRecognitionUnavailable("마이크 권한이 거부되었습니다.")
+            }
+            val flashListPicker = rememberLauncherForActivityResult(com.hdlee73.englishstudy.ui.FilePick.Multiple()) { uris ->
+                studyVm.importFlashDatasets(uris)
+            }
+            val readingFilePicker = rememberLauncherForActivityResult(com.hdlee73.englishstudy.ui.FilePick.Single()) { uri ->
+                if (uri != null) readingVm.openFile(uri)
+            }
+            val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+            // Update notices are notifications, so ask once for the permission on Android 13+.
+            LaunchedEffect(Unit) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                ) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            val exportLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            ) { uri ->
+                if (uri != null) {
+                    try {
+                        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    } catch (_: SecurityException) {
+                    } catch (_: UnsupportedOperationException) {
+                    }
+                    val request = OneTimeWorkRequestBuilder<ExportWorker>()
+                        .setInputData(workDataOf(ExportWorker.KEY_URI to uri.toString(), ExportWorker.KEY_FORMAT to exportFormat))
+                        .build()
+                    WorkManager.getInstance(this@MainActivity).enqueue(request)
+                    dictionaryVm.showMessage("파일 저장을 백그라운드에서 시작했습니다.")
+                }
+            }
+
+            LaunchedEffect(learning.phase, learning.position, learning.listenRequestId, learning.promptRequestId) {
+                speech.mirrorAudio = learning.settings.mirrorAudio
+                speech.phoneMic = learning.settings.phoneMic
+                speech.bluetoothInputAddress = learning.settings.bluetoothInputAddress
+                speech.outdoorAudio = learning.settings.outdoorAudio
+                speech.biasTowardExpected = learning.settings.strictness != RecognitionStrictness.STRICT
+                speech.recognitionLanguage = if (learning.settings.voiceAccent == VoiceAccent.UK) "en-GB" else "en-US"
+                when (learning.phase) {
+                    LessonPhase.SPEAKING -> learning.current?.let {
+                        val korean = learning.settings.mode == LearningMode.TRANSLATION && it.korean.isNotBlank()
+                        speech.speak(
+                            text = if (korean) it.korean else it.english,
+                            korean = korean,
+                            accent = learning.settings.voiceAccent
+                        )
+                    }
+                    LessonPhase.LISTENING -> {
+                        val requiredPermissions = buildList {
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                add(Manifest.permission.RECORD_AUDIO)
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                                ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED &&
+                                !bluetoothPermissionRequested
+                            ) {
+                                add(Manifest.permission.BLUETOOTH_CONNECT)
+                            }
+                        }
+                        if (requiredPermissions.isEmpty()) {
+                            val expected = learning.current?.english.orEmpty()
+                            speech.listen(
+                                if (learning.settings.strictness == RecognitionStrictness.STRICT) expected
+                                else RetryEvaluator.remaining(expected, learning.matchedWords)
+                            )
+                        } else {
+                            if (Manifest.permission.BLUETOOTH_CONNECT in requiredPermissions) bluetoothPermissionRequested = true
+                            audioPermissions.launch(requiredPermissions.toTypedArray())
+                        }
+                    }
+                    LessonPhase.RETRYING, LessonPhase.PAUSED, LessonPhase.COMPLETE, LessonPhase.IDLE, LessonPhase.TIMED_OUT -> speech.stop()
+                    else -> Unit
+                }
+            }
+
+            LaunchedEffect(learning.feedbackSequence) {
+                val success = learning.feedbackSuccess ?: return@LaunchedEffect
+                val sequence = learning.feedbackSequence
+                if (sequence > 0L) {
+                    if (success) {
+                        speech.playSuccessSound { learningVm.onFeedbackFinished(sequence, true) }
+                    } else {
+                        // Incorrect/unfinished attempts remain completely silent.
+                        learningVm.onFeedbackFinished(sequence, false)
+                    }
+                }
+            }
+
+            val savedSentences = remember(saved) { SavedWordSentences.fromEntries(saved) }
+            // The saved words' example sentences become a dataset of their own, always up to date.
+            LaunchedEffect(savedSentences) { learningVm.syncSavedWordsDataset(savedSentences) }
+
+            // The Phrases tab's example sentences become a dataset too (for Speaking, Cards and Quiz).
+            LaunchedEffect(Unit) {
+                val pairs = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching {
+                        assets.open("phrases_us_uk.txt").bufferedReader(Charsets.UTF_8).use { com.hdlee73.englishstudy.phrases.PhraseBank.parse(it.readText()) }
+                            .map { com.hdlee73.englishstudy.speaking.model.SentencePair(it.exampleKo, it.example) }
+                    }.getOrDefault(emptyList())
+                }
+                learningVm.syncPhraseExamples(pairs)
+            }
+
+            sharedText?.let { text ->
+                com.hdlee73.englishstudy.ui.EnglishStudyTheme {
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { sharedText = null },
+                        title = { androidx.compose.material3.Text("선택한 글", fontWeight = androidx.compose.ui.text.font.FontWeight.Bold) },
+                        text = { androidx.compose.material3.Text(text, maxLines = 8) },
+                        confirmButton = {
+                            androidx.compose.foundation.layout.Row {
+                                androidx.compose.material3.TextButton(onClick = {
+                                    sharedText = null
+                                    if (tabIndex == AppTab.SPEAKING.ordinal) { learningVm.pauseForBackground(); speech.stop() }
+                                    dictionaryVm.pickSuggestion(text)
+                                    returnTab = null
+                                    returnApp = null
+                                    tabIndex = AppTab.DICTIONARY.ordinal
+                                }) { androidx.compose.material3.Text("📖 사전·단어장") }
+                                androidx.compose.material3.TextButton(onClick = {
+                                    sharedText = null
+                                    if (tabIndex == AppTab.SPEAKING.ordinal) { learningVm.pauseForBackground(); speech.stop() }
+                                    translateVm.setInput(text)
+                                    translateVm.translate()
+                                    tabIndex = AppTab.TRANSLATE.ordinal
+                                }) { androidx.compose.material3.Text("🌐 번역") }
+                            }
+                        },
+                        dismissButton = { androidx.compose.material3.TextButton(onClick = { sharedText = null }) { androidx.compose.material3.Text("닫기") } }
+                    )
+                }
+            }
+            AppRoot(
+                tab = tab,
+                onOpenUrl = { openUrl(it) },
+                onTab = { next ->
+                    if (tab == AppTab.SPEAKING && next != AppTab.SPEAKING) {
+                        learningVm.pauseForBackground()
+                        speech.stop()
+                    }
+                    if (next != AppTab.DICTIONARY) wordSpeaker.stop()
+                    // Words saved or datasets loaded since the last visit show up in the study setup screens.
+                    if (next == AppTab.FLASHCARDS || next == AppTab.QUIZ) studyVm.refreshSetup()
+                    if (next == AppTab.READING) readingVm.refresh()
+                    if (next == AppTab.LISTENING) {
+                        returnListeningPositionMs?.let { posMs ->
+                            val svc = com.hdlee73.englishstudy.listening.PlaybackService.instance
+                            svc.player.seekTo(posMs)
+                            svc.resume()
+                            returnListeningPositionMs = null
+                        }
+                    } else if (next != AppTab.DICTIONARY) {
+                        returnListeningPositionMs = null
+                    }
+                    returnTab = null
+                    returnApp = null
+                    tabIndex = next.ordinal
+                }
+            ) { selected ->
+                when (selected) {
+                    AppTab.DICTIONARY -> androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.fillMaxSize()) {
+                      val backApp = returnApp
+                      if (backApp != null) {
+                          com.hdlee73.englishstudy.ui.ReturnBar("Everynote로 돌아가기") {
+                              wordSpeaker.stop()
+                              returnApp = null
+                              val launch = packageManager.getLaunchIntentForPackage(backApp)
+                              if (launch != null) {
+                                  launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK)
+                                  try { startActivity(launch) } catch (_: ActivityNotFoundException) { notice("앱을 열 수 없습니다.") }
+                              } else notice("앱을 열 수 없습니다.")
+                          }
+                      }
+                      val back = returnTab?.let { AppTab.values().getOrNull(it) }
+                      if (back != null) {
+                          com.hdlee73.englishstudy.ui.ReturnBar("${back.label} 탭으로 돌아가기") {
+                              wordSpeaker.stop()
+                              if (back == AppTab.LISTENING) {
+                                  returnListeningPositionMs?.let { posMs ->
+                                      val svc = com.hdlee73.englishstudy.listening.PlaybackService.instance
+                                      svc.player.seekTo(posMs)
+                                      svc.resume()
+                                      returnListeningPositionMs = null
+                                  }
+                              }
+                              returnTab = null
+                              tabIndex = back.ordinal
+                          }
+                      }
+                      androidx.compose.foundation.layout.Box(androidx.compose.ui.Modifier.weight(1f)) { DictionaryScreen(
+                        state = dictionary,
+                        saved = saved,
+                        onQueryChange = dictionaryVm::onQueryChange,
+                        onSearch = dictionaryVm::searchNow,
+                        onPickSuggestion = dictionaryVm::pickSuggestion,
+                        onSave = dictionaryVm::saveCurrent,
+                        onDelete = dictionaryVm::deleteSaved,
+                        onShowSaved = dictionaryVm::setShowSaved,
+                        onSort = dictionaryVm::setSort,
+                        onExport = { format ->
+                            if (saved.isEmpty()) {
+                                dictionaryVm.showMessage("내보낼 저장 단어가 없습니다.")
+                            } else {
+                                exportFormat = format
+                                if (Build.VERSION.SDK_INT >= 33 &&
+                                    ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                                exportLauncher.launch(
+                                    when (format) {
+                                        2 -> "영어예문_한영.xlsx"
+                                        3 -> "영어예문.xlsx"
+                                        else -> "영어단어장.xlsx"
+                                    }
+                                )
+                            }
+                        },
+                        onSpeak = wordSpeaker::speak,
+                        onOpenUrl = ::openUrl,
+                        onMessageDismiss = dictionaryVm::clearMessage
+                    )
+                      }
+                    }
+                    AppTab.FLASHCARDS -> FlashcardScreen(
+                        state = flash,
+                        onSource = studyVm::setFlashSource,
+                        onAddList = {
+                            flashListPicker.launch(arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv", "text/comma-separated-values", "application/vnd.ms-excel"))
+                        },
+                        onDeleteList = studyVm::deleteFlashDataset,
+                        onMessageDismiss = studyVm::clearFlashMessage,
+                        onFilter = studyVm::setFilter,
+                        onShuffle = studyVm::setShuffle,
+                        onFrontIsWord = studyVm::setFrontIsWord,
+                        onStart = studyVm::startFlashcards,
+                        onFlip = studyVm::flip,
+                        onAnswer = studyVm::answerCard,
+                        onRetryMissed = studyVm::retryMissedCards,
+                        onEnd = studyVm::endFlashcards,
+                        onSpeak = wordSpeaker::speak
+                    )
+                    AppTab.QUIZ -> QuizScreen(
+                        state = quiz,
+                        onSource = studyVm::setQuizSource,
+                        onCount = studyVm::setQuizCount,
+                        onStart = studyVm::startQuiz,
+                        onChoose = studyVm::chooseAnswer,
+                        onNext = studyVm::nextQuestion,
+                        onRetryWrong = studyVm::retryWrong,
+                        onEnd = studyVm::endQuiz,
+                        onSpeak = wordSpeaker::speak
+                    )
+                    AppTab.READING -> ReadingScreen(
+                        state = reading,
+                        onOpen = readingVm::open,
+                        onClose = readingVm::close,
+                        onMode = readingVm::setMode,
+                        onSaveExpression = readingVm::saveExpression,
+                        onLookup = { word ->
+                            // Search the tapped word in the dictionary tab.
+                            dictionaryVm.pickSuggestion(word)
+                            wordSpeaker.stop()
+                            returnTab = AppTab.READING.ordinal
+                            tabIndex = AppTab.DICTIONARY.ordinal
+                        },
+                        onSpeak = wordSpeaker::speak,
+                        onTranslateSnippet = readingVm::translateSnippet,
+                        onClearSnippet = readingVm::clearSnippet,
+                        onMessageDismiss = readingVm::clearMessage,
+                        savedScroll = readingVm.scrollPosition,
+                        onScroll = readingVm::saveScroll,
+                        savedSelection = readingVm.savedSelection,
+                        onSelection = readingVm::saveSelection,
+                        onOpenFile = {
+                            readingFilePicker.launch(arrayOf(
+                                "text/plain", "text/markdown", "text/csv", "application/pdf", "application/msword",
+                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                "application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                "application/epub+zip", "application/x-hwp", "application/haansofthwp", "application/vnd.hancom.hwpx", "application/octet-stream"
+                            ))
+                        },
+                        onOpenRecent = readingVm::openRecent,
+                        onDeleteRecent = readingVm::deleteRecent,
+                        onFontSp = readingVm::setFontSp,
+                        onLineSpacing = readingVm::setLineSpacing,
+                        onPdfOriginal = readingVm::setPdfOriginal,
+                        onSaveWord = readingVm::saveToWordbook,
+                        savedPage = readingVm.savedPage,
+                        onPage = { readingVm.savedPage = it },
+                        savedZoom = readingVm.savedZoom,
+                        onZoom = { readingVm.savedZoom = it }
+                    )
+                    AppTab.TRANSLATE -> TranslateScreen(
+                        state = translation,
+                        onInput = translateVm::setInput,
+                        onTranslate = translateVm::translate,
+                        onSwap = translateVm::swap,
+                        onClear = translateVm::clear,
+                        onLookup = { text ->
+                            dictionaryVm.pickSuggestion(text)
+                            wordSpeaker.stop()
+                            returnTab = AppTab.TRANSLATE.ordinal
+                            tabIndex = AppTab.DICTIONARY.ordinal
+                        },
+                        onSpeak = wordSpeaker::speak,
+                        onMessageDismiss = translateVm::clearMessage,
+                        onSaveToSpeaking = { english, korean ->
+                            learningVm.addTranslatedSentence(english, korean) { added ->
+                                translateVm.showMessage(
+                                    when (added) {
+                                        true -> "문장말하기 ‘번역 저장 문장’ 데이터셋에 추가했어요."
+                                        false -> "이미 ‘번역 저장 문장’ 데이터셋에 있는 문장이에요."
+                                        null -> "데이터셋에 저장하지 못했어요."
+                                    }
+                                )
+                            }
+                        }
+                    )
+                    AppTab.PHRASES -> com.hdlee73.englishstudy.ui.PhrasesScreen(
+                        onSpeak = wordSpeaker::speak,
+                        onSpeakAll = wordSpeaker::speakAll,
+                        onStopSpeaking = wordSpeaker::stop,
+                        onLookup = { text ->
+                            dictionaryVm.pickSuggestion(text)
+                            wordSpeaker.stop()
+                            returnTab = AppTab.PHRASES.ordinal
+                            tabIndex = AppTab.DICTIONARY.ordinal
+                        }
+                    )
+                    AppTab.SPEAKING -> SpeakFlowApp(
+                        state = learning,
+                        settingsOpen = settingsOpen,
+                        datasetsOpen = datasetsOpen,
+                        onSettingsOpen = { learningVm.pauseForBackground(); speech.refreshBluetoothDevices(); settingsOpen = true },
+                        onSettingsClose = { settingsOpen = false },
+                        onSettingsSave = { learningVm.updateSettings(it); settingsOpen = false },
+                        onDatasetsOpen = { learningVm.pauseForBackground(); datasetsOpen = true },
+                        onDatasetsClose = { datasetsOpen = false },
+                        onDatasetSelect = { learningVm.selectDataset(it); datasetsOpen = false },
+                        onDatasetDelete = learningVm::deleteDataset,
+                        onDatasetEdit = { datasetsOpen = false; learningVm.editDataset(it) },
+                        onEditorClose = learningVm::closeEditor,
+                        onSentenceSave = learningVm::saveSentence,
+                        onOpenUpdate = { openUrl(it) },
+                        onToggleFavorite = { learningVm.toggleFavorite() },
+                        onDatasetSequence = { learningVm.selectDatasets(it); datasetsOpen = false },
+                        onImport = {
+                            datasetsOpen = false
+                            filePicker.launch(arrayOf("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv", "application/vnd.ms-excel"))
+                        },
+                        onPlayPause = learningVm::togglePause,
+                        onRestart = learningVm::restart,
+                        onPrevious = learningVm::previous,
+                        onNext = learningVm::next,
+                        onReplay = learningVm::startSpeaking,
+                        onRetry = learningVm::retryListening,
+                        onToggleRecording = learningVm::toggleRecording,
+                        onMessageDismiss = learningVm::clearMessage
+                    )
+                    AppTab.DOCVOICE -> DocVoiceScreen(docVoiceVm)
+                    AppTab.LISTENING -> ListeningScreen(
+                        pendingIntent = listeningIntent,
+                        onIntentConsumed = { listeningIntent = null },
+                        onLookup = { text ->
+                            dictionaryVm.pickSuggestion(text)
+                            wordSpeaker.stop()
+                            returnTab = AppTab.LISTENING.ordinal
+                            returnListeningPositionMs = com.hdlee73.englishstudy.listening.PlaybackService.instance.player.currentPosition
+                            tabIndex = AppTab.DICTIONARY.ordinal
+                        },
+                        onLookupAt = { text, cueStartMs ->
+                            dictionaryVm.pickSuggestion(text)
+                            wordSpeaker.stop()
+                            returnTab = AppTab.LISTENING.ordinal
+                            returnListeningPositionMs = cueStartMs
+                                ?: com.hdlee73.englishstudy.listening.PlaybackService.instance.player.currentPosition
+                            tabIndex = AppTab.DICTIONARY.ordinal
+                        },
+                        onTranslate = { text ->
+                            translateVm.setInput(text)
+                            translateVm.translate()
+                            tabIndex = AppTab.TRANSLATE.ordinal
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        this.intent = intent
+        if (ListeningLink.isForListening(intent)) listeningIntent = intent
+        DocVoiceLink.sharedYoutubeUrl(intent)?.let(docVoiceVm::openYoutube)
+        if (DocVoiceLink.isForDocVoice(intent)) docVoiceRequest++
+        readExternalLookup(intent)
+        readSharedText(intent)
+    }
+
+    companion object {
+        /** Extras of the intent that opens the dictionary on a word (sent by Everynote). */
+        const val EXTRA_LOOKUP_WORD = "com.hdlee73.englishstudy.extra.LOOKUP_WORD"
+        const val EXTRA_RETURN_PACKAGE = "com.hdlee73.englishstudy.extra.RETURN_PACKAGE"
+    }
+
+    private fun notice(text: String) = android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_SHORT).show()
+
+    private fun openUrl(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: ActivityNotFoundException) {
+            notice("링크를 열 수 있는 앱이 없습니다.")
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // The Enter key of a headset or keyboard moves the speaking lesson on; elsewhere it keeps its normal meaning.
+        if (currentTab == AppTab.SPEAKING && !hasOpenDialog &&
+            event.keyCode in setOf(KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER)
+        ) {
+            if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) learningVm.next()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onPause() {
+        learningVm.saveProgress()
+        super.onPause()
+    }
+
+    override fun onStop() {
+        learningVm.pauseForBackground()
+        speech.stop()
+        wordSpeaker.stop()
+        super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // A word copied in another app is searched when the dictionary tab comes to the front.
+        if (hasFocus && currentTab == AppTab.DICTIONARY) {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+            val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+            if (text.isNotBlank()) dictionaryVm.onClipboardText(text)
+        }
+    }
+
+    override fun onDestroy() {
+        speech.destroy()
+        wordSpeaker.close()
+        super.onDestroy()
+    }
+}

@@ -1,29 +1,104 @@
 package com.hdlee73.englishstudy.translate
 
 import com.hdlee73.englishstudy.dictionary.MiniJson
-import okhttp3.OkHttpClient
-import okhttp3.Request
+import com.hdlee73.englishstudy.reading.TextChunks
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
 
-object TextTranslator {
-    private val client = OkHttpClient()
+/** Which way a text is translated. */
+enum class Direction(val from: String, val to: String, val fromLabel: String, val toLabel: String) {
+    EN_KO("en", "ko", "영어", "한국어"),
+    KO_EN("ko", "en", "한국어", "영어");
 
-    fun translate(text: String, from: String = "auto", to: String = "ko"): String {
-        if (text.isBlank()) return ""
-        return try {
-            val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=$from&tl=$to&dt=t&q=" +
-                    URLEncoder.encode(text.trim(), "UTF-8")
-            val req = Request.Builder().url(url).build()
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return "번역 서버 응답 실패 (${resp.code})"
-                val json = resp.body?.string().orEmpty()
-                val root = MiniJson.parse(json) as? List<*> ?: return "응답 형식 오류"
-                val segments = root.firstOrNull() as? List<*>
-                val translated = segments?.mapNotNull { (it as? List<*>)?.firstOrNull() as? String }?.joinToString("")?.trim().orEmpty()
-                if (translated.isNotEmpty()) translated else "번역 결과를 찾을 수 없습니다."
-            }
-        } catch (e: Exception) {
-            "번역 오류: ${e.message}"
+    fun swapped() = if (this == EN_KO) KO_EN else EN_KO
+}
+
+/** Pure helpers of the translation tab (testable without a device). */
+internal object TextTranslation {
+    const val MAX_CHARS = 5000
+
+    private fun isHangul(c: Char) = c in '가'..'힣' || c in 'ㄱ'..'ㅣ'
+    private fun isLatin(c: Char) = c in 'a'..'z' || c in 'A'..'Z'
+
+    /** The direction that fits the text: Korean-only text goes to English, English-only text to Korean; otherwise [current]. */
+    fun detect(text: String, current: Direction): Direction {
+        val hangul = text.count { isHangul(it) }
+        val latin = text.count { isLatin(it) }
+        return when {
+            hangul > 0 && latin == 0 -> Direction.KO_EN
+            latin > 0 && hangul == 0 -> Direction.EN_KO
+            hangul > latin * 2 -> Direction.KO_EN
+            latin > hangul * 2 -> Direction.EN_KO
+            else -> current
         }
+    }
+
+    fun url(text: String, direction: Direction): String =
+        "https://translate.googleapis.com/translate_a/single?client=gtx&sl=${direction.from}&tl=${direction.to}&dt=t&q=" +
+            URLEncoder.encode(text, "UTF-8")
+
+    /** The translated text of a service response, or null when it has none. */
+    fun parse(json: String): String? {
+        val root = (try { MiniJson.parse(json) } catch (_: IllegalArgumentException) { null }) as? List<*> ?: return null
+        val segments = root.firstOrNull() as? List<*> ?: return null
+        val text = segments.mapNotNull { (it as? List<*>)?.firstOrNull() as? String }.joinToString("")
+        return text.trim().takeIf { it.isNotEmpty() }
+    }
+
+    /** Pieces to send one by one: each line separately (blank lines are kept as null), long lines cut at sentence ends. */
+    fun pieces(text: String): List<List<String>?> =
+        text.trim().lines().map { line -> if (line.isBlank()) null else TextChunks.split(line.trim(), 600) }
+}
+
+/** English ↔ Korean translation through the online service the dictionary already uses. */
+internal class OnlineTranslator {
+    /** The translation, or null when the service gave no usable answer. Blocks; call off the main thread. */
+    fun translate(text: String, direction: Direction): String? {
+        val lines = ArrayList<String>()
+        for (chunks in TextTranslation.pieces(text.take(TextTranslation.MAX_CHARS))) {
+            if (chunks == null) { lines += ""; continue }
+            val parts = ArrayList<String>()
+            for (chunk in chunks) {
+                val json = get(TextTranslation.url(chunk, direction)) ?: return null
+                parts += TextTranslation.parse(json) ?: return null
+            }
+            lines += parts.joinToString(" ")
+        }
+        return lines.joinToString("\n").trim().takeIf { it.isNotEmpty() }
+    }
+
+    private fun get(address: String): String? {
+        val connection = URL(address).openConnection() as HttpURLConnection
+        return try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 5000
+            connection.readTimeout = 9000
+            connection.setRequestProperty("User-Agent", "EnglishStudy/1.0 (Android)")
+            if (connection.responseCode !in 200..299) null
+            else connection.inputStream.bufferedReader().use { it.readText() }
+        } catch (_: IOException) {
+            null
+        } finally {
+            connection.disconnect()
+        }
+    }
+}
+
+/** A plain GET of [address] as text, or null on any network problem or non-2xx answer. Blocks; call off the main thread. */
+internal fun httpGet(address: String, readTimeoutMs: Int = 9000, userAgent: String = "EnglishStudy/1.0 (Android; learning app)"): String? {
+    val connection = try { URL(address).openConnection() as HttpURLConnection } catch (_: IOException) { return null }
+    return try {
+        connection.requestMethod = "GET"
+        connection.connectTimeout = 6000
+        connection.readTimeout = readTimeoutMs
+        connection.setRequestProperty("User-Agent", userAgent)
+        if (connection.responseCode !in 200..299) null
+        else connection.inputStream.bufferedReader().use { it.readText() }
+    } catch (_: IOException) {
+        null
+    } finally {
+        connection.disconnect()
     }
 }

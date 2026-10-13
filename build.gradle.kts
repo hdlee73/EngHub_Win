@@ -13,12 +13,18 @@ dependencies {
     implementation("javazoom:jlayer:1.0.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.xerial:sqlite-jdbc:3.47.1.0")
+    implementation("org.json:json:20240303")
+    implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("org.apache.pdfbox:pdfbox:2.0.32")
+    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
     testImplementation(kotlin("test"))
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
 }
 
 compose.desktop {
     application {
-        mainClass = "com.hdlee73.englishstudy.win.MainKt"
+        mainClass = "com.hdlee73.englishstudy.MainKt"
         buildTypes.release.proguard {
             isEnabled.set(false)
         }
@@ -27,6 +33,7 @@ compose.desktop {
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
                 org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe
             )
+            includeAllModules = true
             packageName = "EngHub"
             packageVersion = "1.0.0"
             description = "EngHub Windows English Study Application"
