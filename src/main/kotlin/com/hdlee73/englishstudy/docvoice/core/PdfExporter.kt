@@ -92,7 +92,8 @@ object PdfExporter {
                     drawLineText(prefix, smallSize, Color(0x9A, 0x90, 0xC0), y - smallSize)
                     y -= smallSize * 1.4f + 2f
                 }
-                for (line in wrapLines(p.text, bodySize)) {
+                // One sentence per line (a long sentence still wraps).
+                for (line in wrapLines(p.lines, bodySize)) {
                     if (y - lineH < MARGIN) newPage()
                     drawLineText(line, bodySize, Color(0x4A, 0x45, 0x60), y - bodySize)
                     y -= lineH

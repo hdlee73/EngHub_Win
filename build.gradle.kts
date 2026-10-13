@@ -23,7 +23,7 @@ dependencies {
 }
 
 // One place for the app version; also written to app.properties, which the app reads for the info dialog and the update check.
-val appVersion = "1.32.0"
+val appVersion = "1.33.1"
 
 tasks.processResources {
     inputs.property("appVersion", appVersion)
