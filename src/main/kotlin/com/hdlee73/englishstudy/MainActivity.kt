@@ -142,7 +142,6 @@ class MainActivity : AppCompatActivity() {
             // The tab a dictionary lookup was started from, so the dictionary can offer a way back to it.
             var returnTab by rememberSaveable { mutableStateOf<Int?>(null) }
             // Modification (3): Timestamp in Listening to seek & resume when returning from Dictionary word lookup.
-            var returnListeningPositionMs by rememberSaveable { mutableStateOf<Long?>(null) }
             // The package of the app that sent the word being looked up; the dictionary shows a "돌아가기" bar for it.
             var returnApp by rememberSaveable { mutableStateOf<String?>(null) }
             LaunchedEffect(externalLookup) {
@@ -335,17 +334,6 @@ class MainActivity : AppCompatActivity() {
                 // Words saved or datasets loaded since the last visit show up in the study setup screens.
                 if (next == AppTab.FLASHCARDS || next == AppTab.QUIZ) studyVm.refreshSetup()
                 if (next == AppTab.READING) readingVm.refresh()
-                // Modification (3): resume Listening where the looked-up word was heard.
-                if (next == AppTab.LISTENING) {
-                    returnListeningPositionMs?.let { posMs ->
-                        val svc = com.hdlee73.englishstudy.listening.PlaybackService.instance
-                        svc.player.seekTo(posMs)
-                        svc.resume()
-                        returnListeningPositionMs = null
-                    }
-                } else if (next != AppTab.DICTIONARY) {
-                    returnListeningPositionMs = null
-                }
                 returnTab = null
                 returnApp = null
                 tabIndex = next.ordinal
@@ -415,14 +403,6 @@ class MainActivity : AppCompatActivity() {
                       if (back != null) {
                           com.hdlee73.englishstudy.ui.ReturnBar("${back.label} 탭으로 돌아가기") {
                               wordSpeaker.stop()
-                              if (back == AppTab.LISTENING) {
-                                  returnListeningPositionMs?.let { posMs ->
-                                      val svc = com.hdlee73.englishstudy.listening.PlaybackService.instance
-                                      svc.player.seekTo(posMs)
-                                      svc.resume()
-                                      returnListeningPositionMs = null
-                                  }
-                              }
                               returnTab = null
                               tabIndex = back.ordinal
                           }
@@ -607,15 +587,6 @@ class MainActivity : AppCompatActivity() {
                             dictionaryVm.pickSuggestion(text)
                             wordSpeaker.stop()
                             returnTab = AppTab.LISTENING.ordinal
-                            returnListeningPositionMs = com.hdlee73.englishstudy.listening.PlaybackService.instance.player.currentPosition
-                            tabIndex = AppTab.DICTIONARY.ordinal
-                        },
-                        onLookupAt = { text, cueStartMs ->
-                            dictionaryVm.pickSuggestion(text)
-                            wordSpeaker.stop()
-                            returnTab = AppTab.LISTENING.ordinal
-                            returnListeningPositionMs = cueStartMs
-                                ?: com.hdlee73.englishstudy.listening.PlaybackService.instance.player.currentPosition
                             tabIndex = AppTab.DICTIONARY.ordinal
                         },
                         onTranslate = { text ->
