@@ -21,4 +21,3 @@ fun formatTimeTenths(ms: Long): String {
 }
 
 fun formatPreciseTime(ms: Long): String = formatTimeTenths(ms)
-

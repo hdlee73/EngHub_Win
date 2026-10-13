@@ -87,7 +87,7 @@ object Stt {
                     if (parts.size == 3) {
                         val start = parts[0].toDoubleOrNull() ?: 0.0
                         val end = parts[1].toDoubleOrNull() ?: (start + 1.0)
-                        val text = parts[2].trim()
+                        val text = Segmenter.cleanAsr(parts[2].trim(), maxOf(end - start, 0.0)) ?: ""
                         if (text.isNotEmpty()) {
                             val punctText = if (text.last() in ".!?。！？") text else "$text."
                             segments.add(Segment(start, maxOf(end, start + 0.3), punctText))

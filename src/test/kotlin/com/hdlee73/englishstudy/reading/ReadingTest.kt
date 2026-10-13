@@ -28,7 +28,7 @@ class ReadingTest {
     }
 
     @Test fun bundledLibraryIsWellFormed() {
-        val file = File("src/main/assets/reading_articles.txt")
+        val file = File("src/main/resources/assets/reading_articles.txt")
         val articles = ReadingLibrary.parse(file.readText(Charsets.UTF_8))
         assertTrue("at least 45 articles, found ${articles.size}", articles.size >= 45)
         assertEquals("size is a multiple of 3 so every day gets a full set", 0, articles.size % 3)

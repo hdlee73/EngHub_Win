@@ -107,6 +107,10 @@ private fun runApp(args: Array<String>) {
         title = "EngHub",
         icon = appIcon,
         onPreviewKeyEvent = { awtKeyEvent ->
+            // Esc = Android's back key: close the open window/list first, then go to the previous menu.
+            if (awtKeyEvent.key == Key.Escape && awtKeyEvent.type == KeyEventType.KeyDown) {
+                if (androidx.activity.compose.BackDispatcher.dispatch()) return@Window true
+            }
             if (awtKeyEvent.key == Key.Enter || awtKeyEvent.key == Key.NumPadEnter) {
                 val action = if (awtKeyEvent.type == KeyEventType.KeyUp) KeyEvent.ACTION_UP else KeyEvent.ACTION_DOWN
                 if (activity.dispatchKeyEvent(KeyEvent(action, KeyEvent.KEYCODE_ENTER))) {

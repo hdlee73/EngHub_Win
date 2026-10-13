@@ -20,9 +20,32 @@ fun ComponentActivity.setContent(content: @Composable () -> Unit) {
     this.contentComposable = content
 }
 
+/** Desktop stand-in for the Android back key: the Esc key (see Main.kt) calls the newest enabled [BackHandler]. */
+object BackDispatcher {
+    class Entry(val enabled: () -> Boolean, val onBack: () -> Unit)
+
+    private val entries = java.util.concurrent.CopyOnWriteArrayList<Entry>()
+
+    fun register(entry: Entry) { entries.add(entry) }
+    fun unregister(entry: Entry) { entries.remove(entry) }
+
+    /** Runs the newest enabled handler; false when nothing wants the key. */
+    fun dispatch(): Boolean {
+        val handler = entries.lastOrNull { it.enabled() } ?: return false
+        handler.onBack()
+        return true
+    }
+}
+
 @Composable
 fun BackHandler(enabled: Boolean = true, onBack: () -> Unit) {
-    // Desktop window provides explicit navigation buttons and ESC handling
+    val currentEnabled = rememberUpdatedState(enabled)
+    val currentOnBack = rememberUpdatedState(onBack)
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val entry = BackDispatcher.Entry({ currentEnabled.value }, { currentOnBack.value() })
+        BackDispatcher.register(entry)
+        onDispose { BackDispatcher.unregister(entry) }
+    }
 }
 
 class ManagedActivityResultLauncher<I, O>(
