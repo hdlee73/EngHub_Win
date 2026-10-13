@@ -15,12 +15,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.loadImageBitmap
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
@@ -32,15 +34,44 @@ import java.awt.event.WindowEvent
 import java.awt.event.WindowFocusListener
 import java.io.File
 
-fun main(args: Array<String>) {
-    Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-        System.err.println("EngHub uncaught exception in thread ${thread.name}:")
-        throwable.printStackTrace(System.err)
-        runCatching {
-            val logFile = File(System.getProperty("user.home"), "EngHub_crash.log")
-            logFile.writeText("Thread: ${thread.name}\n${throwable.stackTraceToString()}\n")
-        }
+/** 클래스패스의 아이콘 PNG 를 읽는다. 어떤 이유로든 실패하면 null (기본 아이콘). */
+private fun loadAppIcon(): Painter? = runCatching {
+    val stream = sequenceOf("drawable/app_icon.png", "icon.png", "app_icon.png")
+        .firstNotNullOfOrNull { Thread.currentThread().contextClassLoader?.getResourceAsStream(it) }
+        ?: return@runCatching null
+    stream.use { BitmapPainter(loadImageBitmap(it)) }
+}.getOrNull()
+
+/** 크래시 내용을 사용자 폴더의 EngHub_crash.log 에 남긴다. */
+private fun writeCrashLog(where: String, throwable: Throwable) {
+    System.err.println("EngHub exception ($where):")
+    throwable.printStackTrace(System.err)
+    runCatching {
+        File(System.getProperty("user.home"), "EngHub_crash.log")
+            .appendText("[$where] ${java.time.LocalDateTime.now()}\n${throwable.stackTraceToString()}\n")
     }
+}
+
+fun main(args: Array<String>) {
+    Thread.setDefaultUncaughtExceptionHandler { thread, throwable -> writeCrashLog("thread ${thread.name}", throwable) }
+    // 시작 중 예외가 나도 jpackage 런처가 "Failed to launch JVM" 으로만 보이지 않도록, 원인을 창으로 알려 준다.
+    try {
+        runApp(args)
+    } catch (t: Throwable) {
+        writeCrashLog("startup", t)
+        runCatching {
+            javax.swing.JOptionPane.showMessageDialog(
+                null,
+                "EngHub 를 시작하지 못했어요.\n\n${t::class.java.simpleName}: ${t.message}\n\n자세한 내용: ${File(System.getProperty("user.home"), "EngHub_crash.log")}",
+                "EngHub",
+                javax.swing.JOptionPane.ERROR_MESSAGE
+            )
+        }
+        System.exit(1)
+    }
+}
+
+private fun runApp(args: Array<String>) {
     application {
         val activity = remember {
             MainActivity().apply {
@@ -54,6 +85,8 @@ fun main(args: Array<String>) {
             }
         }
 
+        // 창 아이콘: 리소스가 없거나 읽기 실패해도 앱 실행은 계속된다 (아이콘 로드 예외가 "Failed to launch JVM" 의 원인이었음).
+        val appIcon = remember { loadAppIcon() }
         val windowState = rememberWindowState(
         width = 520.dp,
         height = 900.dp,
@@ -72,7 +105,7 @@ fun main(args: Array<String>) {
         },
         state = windowState,
         title = "EngHub",
-        icon = painterResource("app_icon.png"),
+        icon = appIcon,
         onPreviewKeyEvent = { awtKeyEvent ->
             if (awtKeyEvent.key == Key.Enter || awtKeyEvent.key == Key.NumPadEnter) {
                 val action = if (awtKeyEvent.type == KeyEventType.KeyUp) KeyEvent.ACTION_UP else KeyEvent.ACTION_DOWN
