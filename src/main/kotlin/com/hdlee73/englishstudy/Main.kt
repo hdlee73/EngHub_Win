@@ -32,20 +32,29 @@ import java.awt.event.WindowEvent
 import java.awt.event.WindowFocusListener
 import java.io.File
 
-fun main(args: Array<String>) = application {
-    val activity = remember {
-        MainActivity().apply {
-            if (args.isNotEmpty()) {
-                val f = File(args[0])
-                if (f.exists()) {
-                    intent = Intent(Intent.ACTION_VIEW, Uri.fromFile(f))
-                }
-            }
-            onCreate(null)
+fun main(args: Array<String>) {
+    Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+        System.err.println("EngHub uncaught exception in thread ${thread.name}:")
+        throwable.printStackTrace(System.err)
+        runCatching {
+            val logFile = File(System.getProperty("user.home"), "EngHub_crash.log")
+            logFile.writeText("Thread: ${thread.name}\n${throwable.stackTraceToString()}\n")
         }
     }
+    application {
+        val activity = remember {
+            MainActivity().apply {
+                if (args.isNotEmpty()) {
+                    val f = File(args[0])
+                    if (f.exists()) {
+                        intent = Intent(Intent.ACTION_VIEW, Uri.fromFile(f))
+                    }
+                }
+                onCreate(null)
+            }
+        }
 
-    val windowState = rememberWindowState(
+        val windowState = rememberWindowState(
         width = 520.dp,
         height = 900.dp,
         position = WindowPosition(Alignment.Center)
@@ -127,3 +136,8 @@ fun main(args: Array<String>) = application {
         }
     }
 }
+}
+
+
+
+

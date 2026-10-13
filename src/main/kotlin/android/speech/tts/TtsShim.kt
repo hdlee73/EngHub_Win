@@ -6,6 +6,7 @@ import android.os.Bundle
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import javax.swing.SwingUtilities
 
 abstract class UtteranceProgressListener {
     abstract fun onStart(utteranceId: String?)
@@ -68,7 +69,15 @@ class TextToSpeech(
     var voice: Voice? = voices.first()
 
     init {
-        initListener?.onInit(SUCCESS)
+        initListener?.let { listener ->
+            SwingUtilities.invokeLater {
+                try {
+                    listener.onInit(SUCCESS)
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
+        }
     }
 
     fun setLanguage(loc: Locale?): Int {

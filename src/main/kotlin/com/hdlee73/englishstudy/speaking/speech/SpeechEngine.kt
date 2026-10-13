@@ -103,16 +103,20 @@ class SpeechEngine(
         tts = TextToSpeech(context.applicationContext) { status ->
             ttsReady = status == TextToSpeech.SUCCESS
             if (ttsReady) {
-                tts.setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                tts.setPitch(1f)
-                pendingPrompt?.also { prompt ->
-                    pendingPrompt = null
-                    speakNow(prompt, 0)
+                runCatching {
+                    if (::tts.isInitialized) {
+                        tts.setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        tts.setPitch(1f)
+                        pendingPrompt?.also { prompt ->
+                            pendingPrompt = null
+                            speakNow(prompt, 0)
+                        }
+                    }
                 }
             } else {
                 pendingPrompt = null
