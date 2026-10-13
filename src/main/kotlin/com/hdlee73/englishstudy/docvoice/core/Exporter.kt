@@ -200,19 +200,30 @@ object Exporter {
         return String.format(java.util.Locale.US, "%02d:%02d:%02d,%03d", ms / 3600000, ms / 60000 % 60, ms / 1000 % 60, ms % 1000)
     }
 
-    /** 자막(.srt): 동일 문장은 시간이 끊기지 않도록 하나의 타임스탬프 구간(Cue)으로 출력한다. */
+    /**
+     * 자막(.srt): 문장 하나 = 자막 하나. 길면 줄만 바꿔 한 자막 안에 모두 담는다(문장을 여러 자막으로 쪼개 시간이 끊기지 않게).
+     * 끝 시각은 다음 문장이 시작하기 전까지로 제한한다.
+     */
     fun srt(sentences: List<Sentence>, showSpeaker: Boolean = false, maxChars: Int = 42): ByteArray {
         val sb = StringBuilder()
         var n = 1
         sentences.forEachIndexed { i, s ->
-            val text = s.text.trim().replace(Regex("\\s+"), " ")
-            if (text.isEmpty()) return@forEachIndexed
             val nextStart = sentences.getOrNull(i + 1)?.start ?: Double.MAX_VALUE
             val end = minOf(maxOf(s.end, s.start + 0.8), maxOf(nextStart, s.start + 0.5))
             val label = if (showSpeaker && s.speaker != null) speakerLabel(s.speaker) + " " else ""
-            sb.append(n++).append('\n')
-                .append(srtTime(s.start)).append(" --> ").append(srtTime(end)).append('\n')
-                .append(label).append(text).append("\n\n")
+            val words = s.text.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            if (words.isEmpty()) return@forEachIndexed
+            val lines = ArrayList<String>()
+            var cur = StringBuilder()
+            for (w in words) {
+                if (cur.isNotEmpty() && cur.length + 1 + w.length > maxChars) { lines.add(cur.toString()); cur = StringBuilder() }
+                if (cur.isNotEmpty()) cur.append(' ')
+                cur.append(w)
+            }
+            if (cur.isNotEmpty()) lines.add(cur.toString())
+            sb.append(n++).append('\n').append(srtTime(s.start)).append(" --> ").append(srtTime(end)).append('\n')
+            lines.forEachIndexed { li, line -> sb.append(if (li == 0) label else "").append(line).append('\n') }
+            sb.append('\n')
         }
         return sb.toString().toByteArray(Charsets.UTF_8)
     }

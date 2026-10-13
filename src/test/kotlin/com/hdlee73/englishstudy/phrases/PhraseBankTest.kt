@@ -7,7 +7,7 @@ import java.io.File
 
 class PhraseBankTest {
     private val all: List<Phrase> by lazy {
-        val file = listOf("src/main/assets/phrases_us_uk.txt", "app/src/main/assets/phrases_us_uk.txt").map(::File).first { it.exists() }
+        val file = listOf("src/main/resources/assets/phrases_us_uk.txt", "app/src/main/resources/assets/phrases_us_uk.txt").map(::File).first { it.exists() }
         PhraseBank.parse(file.readText())
     }
 

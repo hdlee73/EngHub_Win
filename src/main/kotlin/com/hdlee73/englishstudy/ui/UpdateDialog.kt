@@ -22,7 +22,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Update popup: downloads the new APK in the app, then opens the system installer (the user taps "Install" once).
+ * Update popup: downloads the new Windows installer in the app and runs it; EngHub closes and the installer replaces it.
  * The first time, Android asks to allow EngHub to install apps; after allowing, the button continues from the downloaded file.
  */
 @Composable
@@ -60,7 +60,7 @@ fun UpdateDialog(release: UpdateChecker.Release, onOpenUrl: (String) -> Unit, on
                 when {
                     error != null -> Text(error!!, color = Blue, fontSize = 13.sp)
                     file != null -> Text(
-                        if (UpdateInstaller.canInstall(ctx)) "받기가 끝났어요. 설치 화면에서 ‘설치’(또는 ‘업데이트’)를 눌러 주세요."
+                        if (UpdateInstaller.canInstall(ctx)) "받기가 끝났어요. 설치 창이 열리면 끝날 때까지 기다려 주세요."
                         else "‘이 출처 허용’을 한 번 켜 주세요. 켠 뒤 돌아와서 ‘설치하기’를 누르면 됩니다.",
                         fontSize = 13.sp
                     )
@@ -69,7 +69,7 @@ fun UpdateDialog(release: UpdateChecker.Release, onOpenUrl: (String) -> Unit, on
                         if (p in 0f..1f) LinearProgressIndicator(progress = { p }) else LinearProgressIndicator()
                         Text(if (p in 0f..1f) "받는 중… ${(p * 100).toInt()}%" else "받는 중…", fontSize = 13.sp)
                     }
-                    else -> Text("앱 안에서 바로 받고 설치 화면까지 열어 드려요. 안드로이드 규칙상 마지막 ‘설치’ 버튼은 직접 한 번 눌러야 합니다.", fontSize = 13.sp)
+                    else -> Text("앱 안에서 바로 받아 설치까지 진행해요. 설치가 시작되면 EngHub가 잠시 닫혔다가, 설치가 끝난 뒤 바탕화면·시작 메뉴의 EngHub로 다시 열면 됩니다.", fontSize = 13.sp)
                 }
             }
         },

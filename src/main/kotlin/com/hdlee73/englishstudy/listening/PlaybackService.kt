@@ -380,6 +380,36 @@ class PlaybackService : Service() {
         player.pause()
     }
 
+    // ---- "go to the dictionary and come back to the same words" ----
+    private var lookupTrackUri: String? = null
+    private var lookupPositionMs = -1L
+    private var lookupAt = 0L
+
+    /** Remembers where the picked words are in the track and pauses; [takeLookupReturn] restarts from there. */
+    fun rememberLookup(positionMs: Long) {
+        lookupTrackUri = currentUri
+        lookupPositionMs = positionMs.coerceAtLeast(0L)
+        lookupAt = System.currentTimeMillis()
+        cancelGap()
+        player.pause()
+    }
+
+    /** The point to resume from when the user comes back to Listening after a lookup (once), or -1. */
+    fun takeLookupReturn(): Long {
+        val pos = lookupPositionMs
+        val fresh = pos >= 0L && lookupTrackUri == currentUri && System.currentTimeMillis() - lookupAt < 30 * 60_000L
+        lookupPositionMs = -1L
+        lookupTrackUri = null
+        return if (fresh) pos else -1L
+    }
+
+    /** The desktop service lives as long as the process; these exist so the screen can use the same calls as on Android. */
+    fun onUiAttached() {}
+    fun onUiDetached() {}
+
+    /** Folders imported before v1.22 are linked through Android's persisted tree permissions; not needed on Windows. */
+    fun linkLegacyImports() {}
+
     private var tickerRunning = false
     private val ticker = object : Runnable {
         override fun run() {
