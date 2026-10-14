@@ -12,7 +12,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +32,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
@@ -52,7 +55,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 private const val NORMAL_HINT = "문장을 누르면 그 위치로 이동 · 길게 누르면 그 문장을 구간 반복 · 길게 누른 채 끌면 여러 문장을 구간 반복"
-private const val SELECT_HINT = "글자 선택 모드: 자막 글자를 누른 채 끌면 다른 문장(시간대)까지 이어서 고를 수 있어요. 손을 떼면 ‘이 부분 재생 · 단어장·사전 · 번역 · 복사’ 메뉴가 나와요. (메뉴 ⋮ 에서 끌 수 있어요)"
+private const val SELECT_HINT = "글자 선택 모드: 자막 글자를 누른 채 끌면 다른 문장(시간대)까지 이어서 고를 수 있어요. 손을 떼면 ‘이 부분 재생 · 단어장·사전 · 번역 · 복사’ 메뉴가 나와요. (위의 글자 선택 버튼으로 끌 수 있어요)"
 
 /** The picked text of select mode, which may run over several sentences: (cue index, character offset) of both ends. */
 private class TextSel(val loPos: Int, val loOff: Int, val hiPos: Int, val hiOff: Int)
@@ -269,22 +272,24 @@ internal fun BoxScope.SubtitleSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("자막", color = LsText, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                // The select-mode toggle sits in the title bar: full opacity while on, dimmed while off.
+                Box(Modifier.padding(end = 6.dp).alpha(if (selectMode) 1f else 0.45f)) {
+                    HeaderIcon(R.drawable.ls_ic_edit, "글자 선택 모드") {
+                        selectMode = !selectMode
+                        sel = null
+                        env.toast(if (selectMode) "자막 글자를 길게 눌러 단어나 구절을 고르세요." else "글자 선택 모드를 껐습니다.")
+                    }
+                }
                 HeaderIcon(if (svc.isActive) R.drawable.ls_ic_pause else R.drawable.ls_ic_play, "재생/일시정지") { svc.togglePlay() }
                 Box(Modifier.padding(start = 6.dp)) {
                     HeaderIcon(R.drawable.ls_ic_more, "자막 메뉴") { moreMenu = true }
                     val items = buildList {
-                        add(MenuItem(3, if (selectMode) "글자 선택 모드 끄기" else "글자 선택 모드 (단어·구절 고르기)", R.drawable.ls_ic_edit))
                         add(MenuItem(1, if (svc.subtitleUri == null) "자막 파일 선택" else "다른 자막 파일 선택", R.drawable.ls_ic_subtitles))
                         if (svc.subtitleUri != null) add(MenuItem(2, "이 곡의 자막 제거", R.drawable.ls_ic_delete, destructive = true))
                     }
                     IconMenu(moreMenu, { moreMenu = false }, items) { id ->
                         when (id) {
                             1 -> env.pickSubtitle()
-                            3 -> {
-                                selectMode = !selectMode
-                                sel = null
-                                env.toast(if (selectMode) "자막 글자를 끌어서 단어나 구절을 고르세요." else "글자 선택 모드를 껐습니다.")
-                            }
                             2 -> svc.setSubtitle(null)
                         }
                     }

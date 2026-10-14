@@ -323,6 +323,9 @@ internal fun SrtDialog(env: LsEnv, entries: List<TrackStore.Entry>, onDismiss: (
     val single = todo.size == 1
     var name by remember { mutableStateOf(if (single) Storage.cleanName(todo[0].name.substringBeforeLast('.', todo[0].name), "srt") else "") }
     var folderVersion by remember { mutableIntStateOf(0) }
+    // English uses the English-only model on Android; Korean (or automatic detection) needs the multilingual one.
+    val languages = listOf("en" to "영어", "ko" to "한국어", "" to "자동 감지")
+    var language by remember { mutableIntStateOf(0) }
     val folderLabel = remember(folderVersion) { SaveFolder.label(context) }
     val hasFolder = remember(folderVersion) { SaveFolder.get(context) != null }
 
@@ -330,7 +333,7 @@ internal fun SrtDialog(env: LsEnv, entries: List<TrackStore.Entry>, onDismiss: (
         "자막(SRT) 만들기", onDismiss, "만들기",
         {
             val names = if (single) mapOf(todo[0].uri to Storage.cleanName(name, "srt")) else emptyMap()
-            SrtMaker.start(context, todo, names = names)
+            SrtMaker.start(context, todo, languages[language].first, names)
             onDismiss()
         }
     ) {
@@ -350,6 +353,16 @@ internal fun SrtDialog(env: LsEnv, entries: List<TrackStore.Entry>, onDismiss: (
                 Text("확장자 .srt 는 자동으로 붙어요.", color = LsText2, fontSize = 12.sp)
             } else {
                 Text("파일 이름은 곡 이름을 그대로 써요.", color = LsText2, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+            }
+            Text("말하는 언어", color = LsText, fontSize = 14.sp, modifier = Modifier.padding(top = 12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                languages.forEachIndexed { i, (_, label) ->
+                    androidx.compose.material3.RadioButton(
+                        selected = language == i, onClick = { language = i },
+                        colors = androidx.compose.material3.RadioButtonDefaults.colors(selectedColor = LsTeal)
+                    )
+                    Text(label, color = LsText, fontSize = 14.sp, modifier = Modifier.clickable { language = i }.padding(end = 8.dp))
+                }
             }
             Text("저장 폴더: $folderLabel", color = LsText, fontSize = 14.sp, modifier = Modifier.padding(top = 12.dp))
             Row {
