@@ -77,11 +77,16 @@ object UpdateChecker {
         val tag = json.optString("tag_name")
         if (tag.isBlank() || json.optBoolean("draft") || json.optBoolean("prerelease")) return@withContext available(context)
         val assets = json.optJSONArray("assets")
-        // The Windows installer (.msi) is what the in-app update downloads and runs.
+        // The Windows installer (.msi) for this machine's processor (x64 or arm64) is what the in-app update downloads and runs.
+        val arch = if (System.getProperty("os.arch").orEmpty().lowercase().let { it.contains("aarch64") || it.contains("arm64") }) "arm64" else "x64"
         var apk: String? = null
         if (assets != null) for (i in 0 until assets.length()) {
             val a = assets.optJSONObject(i) ?: continue
-            if (a.optString("name").endsWith(".msi", ignoreCase = true)) { apk = a.optString("browser_download_url").ifBlank { null }; break }
+            val name = a.optString("name")
+            if (name.endsWith(".msi", ignoreCase = true) && name.contains(arch, ignoreCase = true)) {
+                apk = a.optString("browser_download_url").ifBlank { null }
+                break
+            }
         }
         prefs(context).edit().putString(KEY_VERSION, tag).putString(KEY_URL, json.optString("html_url").ifBlank { RELEASES_URL })
             .putString(KEY_APK, apk).apply()
