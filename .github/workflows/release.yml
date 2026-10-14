@@ -12,49 +12,87 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: windows-latest
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, os: windows-latest, java-arch: x64 }
+          - { arch: arm64, os: windows-11-arm, java-arch: aarch64 }
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
+          architecture: ${{ matrix.java-arch }}
 
-      - name: Grant execute permission for gradlew
-        run: git update-index --chmod=+x gradlew || true
-        shell: bash
+      - name: Ensure WiX Toolset (needed for MSI / EXE installers)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\\WiX Toolset v3.14\bin\candle.exe")) {
+            Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile wix.zip
+            Expand-Archive wix.zip -DestinationPath "$HOME/wix"
+            "$HOME/wix" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
 
-      - name: Run Unit Tests
-        run: ./gradlew.bat test
+      - name: Unit tests
+        if: matrix.arch == 'x64'
+        run: ./gradlew.bat test --no-daemon
 
-      - name: Build Windows Distributable & UberJar
-        run: ./gradlew.bat createDistributable packageMsi
+      - name: Build app image, MSI and EXE installers
+        run: ./gradlew.bat createDistributable packageMsi packageExe --no-daemon
 
       - name: Collect release files
+        shell: pwsh
         run: |
           $version = (Select-String -Path build.gradle.kts -Pattern 'val appVersion = "([^"]+)"').Matches[0].Groups[1].Value
-          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Compress-Archive -Path "build/compose/binaries/main/app/EngHub/*" -DestinationPath "EngHub-windows-x64-$version.zip"
+          $arch = "${{ matrix.arch }}"
+          New-Item -ItemType Directory -Path out | Out-Null
+          Compress-Archive -Path "build/compose/binaries/main/app/EngHub/*" -DestinationPath "out/EngHub-windows-$arch-$version.zip"
           $msi = Get-ChildItem -Path build/compose/binaries/main/msi -Filter *.msi | Select-Object -First 1
-          Copy-Item -Path $msi.FullName -Destination "EngHub-windows-x64-$version.msi"
+          Copy-Item -Path $msi.FullName -Destination "out/EngHub-windows-$arch-$version.msi"
+          $exe = Get-ChildItem -Path build/compose/binaries/main/exe -Filter *.exe | Select-Object -First 1
+          Copy-Item -Path $exe.FullName -Destination "out/EngHub-windows-$arch-$version.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    # The x64 files are required; the ARM64 files are added when that build succeeded.
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: out
+          merge-multiple: true
+
+      - name: Prepare release notes
+        run: |
+          version=$(grep -oP 'val appVersion = "\K[^"]+' build.gradle.kts)
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
           # Release body = only the newest section of RELEASE_NOTES.md.
-          $n = 0; $out = @()
-          foreach ($line in Get-Content RELEASE_NOTES.md) { if ($line -like '## *') { $n++ }; if ($n -eq 1) { $out += $line } }
-          Set-Content -Path release-notes.md -Value $out -Encoding utf8
-        shell: pwsh
+          awk '/^## /{n++} n==1' RELEASE_NOTES.md > release-notes.md
+          ls -l out
+          test -n "$(ls out/EngHub-windows-x64-*.msi 2>/dev/null)"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         with:
           # A push to main releases v<appVersion> (like the Android app); pushing the same version again replaces its files.
           tag_name: v${{ env.APP_VERSION }}
           name: EngHub for Windows v${{ env.APP_VERSION }}
-          files: |
-            EngHub-windows-x64-*.msi
-            EngHub-windows-x64-*.zip
+          files: out/*
           body_path: release-notes.md

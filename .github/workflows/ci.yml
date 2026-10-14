@@ -25,8 +25,17 @@ jobs:
         run: ./gradlew.bat test --no-daemon
 
   windows-launch:
-    runs-on: windows-latest
-    timeout-minutes: 30
+    name: windows-launch (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    # The ARM64 build is reported but does not block the PR while it is new.
+    continue-on-error: ${{ matrix.arch == 'arm64' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, os: windows-latest, java-arch: x64 }
+          - { arch: arm64, os: windows-11-arm, java-arch: aarch64 }
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +43,16 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+          architecture: ${{ matrix.java-arch }}
+
+      - name: Ensure WiX Toolset (needed for MSI / EXE installers)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin\candle.exe")) {
+            Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile wix.zip
+            Expand-Archive wix.zip -DestinationPath "$HOME/wix"
+            "$HOME/wix" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
 
       - name: Build Windows app image
         run: ./gradlew.bat createDistributable --no-daemon
@@ -74,19 +93,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: launch-screenshot
+          name: launch-screenshot-${{ matrix.arch }}
           path: launch.png
           if-no-files-found: ignore
 
-      - name: Build MSI installer (packaging check)
-        run: ./gradlew.bat packageMsi --no-daemon
+      - name: Build MSI and EXE installers (packaging check)
+        run: ./gradlew.bat packageMsi packageExe --no-daemon
 
       - name: Zip test build
         shell: pwsh
-        run: Compress-Archive -Path "build/compose/binaries/main/app/EngHub/*" -DestinationPath "EngHub-windows-x64-test.zip"
+        run: Compress-Archive -Path "build/compose/binaries/main/app/EngHub/*" -DestinationPath "EngHub-windows-${{ matrix.arch }}-test.zip"
 
       - name: Upload test build
         uses: actions/upload-artifact@v4
         with:
-          name: EngHub-windows-x64-test
-          path: EngHub-windows-x64-test.zip
+          name: EngHub-windows-${{ matrix.arch }}-test
+          path: EngHub-windows-${{ matrix.arch }}-test.zip
