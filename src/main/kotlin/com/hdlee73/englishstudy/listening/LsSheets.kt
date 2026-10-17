@@ -333,7 +333,12 @@ internal fun SrtDialog(env: LsEnv, entries: List<TrackStore.Entry>, onDismiss: (
         "자막(SRT) 만들기", onDismiss, "만들기",
         {
             val names = if (single) mapOf(todo[0].uri to Storage.cleanName(name, "srt")) else emptyMap()
-            SrtMaker.start(context, todo, languages[language].first, names)
+            val lang = languages[language].first
+            SrtMaker.start(
+                context, todo, lang, names,
+                if (lang == "en") com.hdlee73.englishstudy.docvoice.core.WhisperSize.SMALL_EN
+                else com.hdlee73.englishstudy.docvoice.core.WhisperSize.SMALL,
+            )
             onDismiss()
         }
     ) {

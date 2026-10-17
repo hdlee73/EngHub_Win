@@ -82,14 +82,51 @@ object Environment {
     const val DIRECTORY_DOCUMENTS = "Documents"
 
     fun getExternalStoragePublicDirectory(type: String): File =
-        File(System.getProperty("user.home"), type).apply { mkdirs() }
+        File(android.content.Context.publicRoot, type).apply { mkdirs() }
 }
 
-class Looper private constructor() {
+class Looper private constructor(val isMain: Boolean) {
     companion object {
-        private val MAIN = Looper()
+        private val MAIN = Looper(true)
+        private val current = ThreadLocal<Looper?>()
         fun getMainLooper(): Looper = MAIN
-        fun myLooper(): Looper = MAIN
+
+        /** The calling thread's looper: the main one unless this thread prepared its own (see [HandlerThread]). */
+        fun myLooper(): Looper = current.get() ?: MAIN
+
+        internal fun prepareCurrent() { current.set(Looper(false)) }
+        internal fun clearCurrent() { current.remove() }
+    }
+}
+
+/**
+ * A background thread with its own looper. Not used by the current app, but provided so that a
+ * `Handler(handlerThread.looper)` runs off the Swing EDT instead of silently on it.
+ */
+class HandlerThread(name: String) : Thread(name) {
+    @Volatile private var looper: Looper? = null
+    @Volatile private var running = true
+
+    fun getLooper(): Looper? {
+        if (looper == null) {
+            Looper.prepareCurrent()
+            looper = Looper.myLooper()
+        }
+        return looper
+    }
+
+    fun quit() {
+        running = false
+        Looper.clearCurrent()
+        looper = null
+    }
+
+    override fun run() {
+        Looper.prepareCurrent()
+        while (running) {
+            runCatching { Thread.sleep(1000) }
+        }
+        Looper.clearCurrent()
     }
 }
 
@@ -98,25 +135,32 @@ class Handler(val looper: Looper = Looper.getMainLooper()) {
         private val scheduler = Executors.newScheduledThreadPool(2) { r ->
             Thread(r, "EngHub-Handler").apply { isDaemon = true }
         }
+        private val background = Executors.newCachedThreadPool { r ->
+            Thread(r, "EngHub-HandlerTask").apply { isDaemon = true }
+        }
     }
 
     private val tasks = ConcurrentHashMap<Runnable, MutableList<ScheduledFuture<*>>>()
 
+    /** Deliver to the Swing EDT for the main looper, or to a background pool for a non-main looper. */
+    private fun dispatch(r: Runnable) {
+        if (looper.isMain) SwingUtilities.invokeLater(r) else background.execute(r)
+    }
+
     fun post(r: Runnable): Boolean {
-        if (SwingUtilities.isEventDispatchThread()) {
-            SwingUtilities.invokeLater(r)
-        } else {
-            SwingUtilities.invokeLater(r)
-        }
+        dispatch(r)
         return true
     }
 
     fun postDelayed(r: Runnable, delayMillis: Long): Boolean {
-        val future = scheduler.schedule({
-            tasks[r]?.removeIf { it.isDone }
-            SwingUtilities.invokeLater(r)
+        val holder = arrayOfNulls<ScheduledFuture<*>>(1)
+        holder[0] = scheduler.schedule({
+            // Remove this finished one-shot task (and any other finished ones) so the map does not grow forever.
+            tasks[r]?.remove(holder[0])
+            if (tasks[r]?.isEmpty() == true) tasks.remove(r)
+            dispatch(r)
         }, delayMillis.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
-        tasks.computeIfAbsent(r) { mutableListOf() }.add(future)
+        tasks.computeIfAbsent(r) { mutableListOf() }.add(holder[0]!!)
         return true
     }
 

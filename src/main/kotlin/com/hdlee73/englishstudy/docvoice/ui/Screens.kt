@@ -147,7 +147,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.RecordScreen(vm: DocV
     val rec by vm.rec.collectAsState()
     var sheet by remember { mutableStateOf(false) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { r ->
-        if (r[Manifest.permission.RECORD_AUDIO] == true) vm.startRecording() else Toast.makeText(ctx, "마이크 권한이 필요해요.", Toast.LENGTH_SHORT).show()
+        if (r[Manifest.permission.RECORD_AUDIO] == true) vm.startRecording() else Toast.makeText(ctx, "마이크를 사용할 수 없어요.", Toast.LENGTH_SHORT).show()
     }
     fun start() {
         val need = ArrayList<String>()
@@ -161,17 +161,18 @@ private fun androidx.compose.foundation.layout.ColumnScope.RecordScreen(vm: DocV
     val stopped = rec.phase == RecPhase.Stopped
     val idle = rec.phase == RecPhase.Idle || rec.phase == RecPhase.Failed
 
-    ScreenHero("🎙️", "녹음 & 문서화", "말하는 대로 글자가 나타나요") {
+    ScreenHero("🎙️", "녹음 & 문서화", "녹음을 마치면 글로 바뀌어요") {
         if (stopped) RoundIcon(Icons.Rounded.Tune, Color.White) { sheet = true }
     }
     ModeSwitch(vm)
-    val jobNow = vm.job.collectAsState().value
-    val modelReady = remember(vm.recLang, jobNow) { vm.liveReady(vm.recLang) }
     if (idle) {
-        Segmented(LiveLang.values().map { it.label }, LiveLang.values().indexOfFirst { it.key == vm.recLang }.coerceAtLeast(0)) {
-            vm.recLang = LiveLang.values()[it].key; vm.save()
+        // 이 셰임에는 실시간(스트리밍) 인식 엔진이 없어 녹음 중에 글자가 바로 뜨지는 않습니다.
+        // 대신 녹음을 마치면 Windows 음성 인식기로 받아써서 문서를 만듭니다 (파일 변환과 같은 경로).
+        val langs = listOf(LiveLang.EN, LiveLang.KO)
+        Segmented(langs.map { it.label }, langs.indexOfFirst { it.key == vm.recLang }.coerceAtLeast(0)) {
+            vm.recLang = langs[it].key; vm.save()
         }
-        Segmented(listOf("자동 (블루투스 우선)", "내장 마이크"), if (vm.recBluetooth) 0 else 1) { vm.recBluetooth = it == 0; vm.save() }
+        Segmented(listOf("블루투스 우선 (연결 시)", "기본 마이크"), if (vm.recBluetooth) 0 else 1) { vm.recBluetooth = it == 0; vm.save() }
     } else if (live || busy) {
         Text(LiveLang.of(vm.recLang).label + if (rec.source.isNotEmpty()) " · ${rec.source}" else "", fontSize = 13.sp, color = Dv.Secondary, modifier = Modifier.padding(start = 4.dp))
     }
@@ -196,12 +197,24 @@ private fun androidx.compose.foundation.layout.ColumnScope.RecordScreen(vm: DocV
                         rec.message ?: if (rec.peak < 0.01f) "마이크 소리가 들어오지 않았어요" else "인식된 말이 없어요",
                         fontSize = 15.sp, color = Dv.Secondary,
                     )
-                }
-                if (idle && !modelReady) {
-                    FilledButton(
-                        "${LiveLang.of(vm.recLang).label} 모델 내려받기 (약 ${LiveLang.of(vm.recLang).mb}MB)", Icons.Rounded.CloudDownload,
-                        enabled = jobNow !is JobState.Running, modifier = Modifier.padding(horizontal = 24.dp).fillMaxWidth(),
-                    ) { vm.downloadModel() }
+                } else if (live) {
+                    Text(
+                        "녹음 중이에요. 멈추면 받아써서 문서로 만들어요.",
+                        fontSize = 15.sp, color = Dv.Secondary, textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                    )
+                } else if (busy) {
+                    Text(
+                        rec.message ?: "받아쓰는 중이에요.",
+                        fontSize = 15.sp, color = Dv.Secondary, textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                    )
+                } else {
+                    Text(
+                        "녹음을 시작하면, 멈춘 뒤 Windows 음성 인식으로 받아써서 문서로 만들어요.",
+                        fontSize = 15.sp, color = Dv.Secondary, textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                    )
                 }
             }
         }
@@ -252,12 +265,8 @@ private fun androidx.compose.foundation.layout.ColumnScope.RecordScreen(vm: DocV
 
     if (sheet) SettingsSheet({ sheet = false }) {
         SaveOptions(vm, "", {}, vm.recFormat, nameField = false)
-        SheetTitle("내보내기 설정", "• 정밀 재인식: 녹음이 끝난 뒤 더 정확한 모델로 처음부터 다시 받아써서 문서에 담아요. (시간이 더 걸려요)\n• 화자 구분: 누가 말했는지 나눠 줄을 바꿔요.\n• 줄바꿈 간격: 발언 사이가 이 시간보다 길면 줄을 바꿔요.")
+        SheetTitle("내보내기 설정", "• 줄바꿈 간격: 발언 사이가 이 시간보다 길면 줄을 바꿔요.\n• 시간 표시: 문장마다 녹음 시각을 함께 적어요.")
         Group {
-            row { ToggleRow(Icons.Rounded.AutoAwesome, Dv.Blue, "정밀 재인식", vm.recRefine) { vm.recRefine = it } }
-            if (vm.recRefine) row { SegmentedRow(WhisperSize.values().map { it.label }, vm.size.ordinal) { vm.size = WhisperSize.values()[it]; vm.save() } }
-            row { ToggleRow(Icons.Rounded.People, Dv.Blue, "화자 구분", vm.recDiarize) { vm.recDiarize = it } }
-            if (vm.recDiarize) row { ToggleRow(Icons.Rounded.RecordVoiceOver, Dv.Blue, "화자 표시", vm.showSpeaker) { vm.showSpeaker = it; vm.save() } }
             row { ToggleRow(Icons.Rounded.Schedule, Dv.Blue, "시간 표시", vm.includeTime) { vm.includeTime = it; vm.save() } }
             row { SliderRow(Icons.Rounded.Subject, Dv.Blue, String.format(Locale.US, "%.1f초", vm.gap), vm.gap, 0.5f..4f, 6) { vm.gap = Math.round(it * 10) / 10f; vm.save() } }
         }
@@ -441,7 +450,7 @@ private fun SttScreen(vm: DocVoiceViewModel) {
 
     ScreenHero(
         "📝", "MP3 → 문서", "음성 파일을 문서로 받아써요",
-        "음성 파일(mp3, m4a, wav, mp4 등)을 문서로 바꿔요.\n\n• XLSX: 한 문장이 한 행에 들어가요. 영어는 단어 3개 이상일 때만 한 문장으로 쳐요.\n• DOCX · PDF · TXT: 화자가 바뀌거나 발언 간격이 길면 줄을 바꿔요.\n\n인식은 휴대폰 안에서 이뤄져요. 처음 한 번만 모델을 내려받고, 화면을 꺼도 계속돼요.",
+        "음성 파일(mp3, m4a, wav, mp4 등)을 문서로 바꿔요.\n\n• XLSX: 한 문장이 한 행에 들어가요. 영어는 단어 3개 이상일 때만 한 문장으로 쳐요.\n• DOCX · PDF · TXT: 발언 간격이 길면 줄을 바꿔요.\n\n받아쓰기는 Windows 음성 인식기로 이뤄져요(따로 모델을 내려받지 않아요). 창을 최소화해도 계속돼요.",
     ) { RoundIcon(Icons.Rounded.Tune, Color.White) { sheet = true } }
     ModeSwitch(vm)
     JobPanel(vm)
@@ -456,18 +465,15 @@ private fun SttScreen(vm: DocVoiceViewModel) {
     }
     Group {
         row { SegmentedRow(vm.formats.map { it.uppercase(Locale.ROOT) }, vm.formats.indexOf(vm.format).coerceAtLeast(0)) { vm.format = vm.formats[it]; vm.save() } }
-        row { ToggleRow(Icons.Rounded.People, Dv.Blue, "화자 구분", vm.diarize) { vm.diarize = it; vm.save() } }
         row { ToggleRow(Icons.Rounded.Schedule, Dv.Blue, "시간 표시", vm.includeTime) { vm.includeTime = it; vm.save() } }
     }
     SaveOptions(vm, vm.sttName, { vm.sttName = it }, vm.format)
     FilledButton("문서로 변환", Icons.Rounded.Description, enabled = vm.sttFile != null && !busy) { vm.startStt() }
 
     if (sheet) SettingsSheet({ sheet = false }) {
-        SheetTitle("인식 설정", "정확도 '정확'은 모델이 커서 처음 내려받는 데 시간이 걸리고 인식도 더 오래 걸려요. 줄바꿈 간격은 발언 사이가 이 시간보다 길면 줄을 바꾸는 기준이에요.")
+        SheetTitle("인식 설정", "언어는 음성 인식기가 고르는 기준이에요(자동/한국어/영어). 줄바꿈 간격은 발언 사이가 이 시간보다 길면 줄을 바꾸는 기준이에요.")
         Group {
             row { SegmentedRow(listOf("자동", "한국어", "영어"), listOf("", "ko", "en").indexOf(vm.language).coerceAtLeast(0)) { vm.language = listOf("", "ko", "en")[it]; vm.save() } }
-            row { SegmentedRow(WhisperSize.values().map { it.label }, vm.size.ordinal) { vm.size = WhisperSize.values()[it]; vm.save() } }
-            if (vm.diarize) row { ToggleRow(Icons.Rounded.RecordVoiceOver, Dv.Blue, "화자 표시", vm.showSpeaker) { vm.showSpeaker = it; vm.save() } }
             row { SliderRow(Icons.Rounded.Subject, Dv.Blue, String.format(Locale.US, "%.1f초", vm.gap), vm.gap, 0.5f..4f, 6) { vm.gap = Math.round(it * 10) / 10f; vm.save() } }
         }
     }

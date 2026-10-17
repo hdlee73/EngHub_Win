@@ -9,12 +9,14 @@
 ## 메뉴
 Words(단어·사전) · Reading · Flashcards · Quiz · Phrases · Translate · Speaking · Listening(MP3 플레이어, 자막) · DocVoice(문서↔MP3, 자막 만들기)
 
-- 뒤로가기 = **Esc**
-- 설정·학습 기록은 `%USERPROFILE%\.enghub` 에 저장됩니다.
+- 창 왼쪽에 항상 보이는 메뉴(사이드바)와 상단 메뉴 표시줄, 알림 영역(트레이) 아이콘을 씁니다.
+- 단축키: `Ctrl+1`~`Ctrl+9` 화면 전환, `Ctrl+K` 단어장 검색, `Ctrl+Q` 종료, 뒤로가기 = **Esc**
+- 설정·학습 기록은 `%USERPROFILE%\.enghub` 에 저장됩니다. 창 위치·크기와 마지막 화면도 함께 저장해 다음 실행 때 그대로 엽니다.
 - 시작 중 오류가 나면 안내 창이 뜨고 `%USERPROFILE%\EngHub_crash.log` 에 기록됩니다.
 
 ## 안드로이드 버전과 다른 점
 - 음성 받아쓰기: Windows 음성 인식(SAPI) 사용 (안드로이드는 Whisper). MP3 변환은 ffmpeg가 필요합니다.
+- 문서 → MP3의 온라인 음성은 Microsoft Edge 읽어주기 서비스를 씁니다(비공식 경로라 서비스 정책에 따라 막힐 수 있어요). 실패하면 인터넷 연결과 PC 시계를 확인하세요.
 - 업데이트는 Play 스토어가 아니라 GitHub 릴리스의 `.msi` 설치 파일입니다.
 
 ## 빌드

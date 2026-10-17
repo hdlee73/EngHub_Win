@@ -66,14 +66,24 @@ class ManagedActivityResultLauncher<I, O>(
             is ActivityResultContracts.CreateDocument -> {
                 val defaultName = (input as? String) ?: "output"
                 Thread {
-                    val dialog = FileDialog(null as Frame?, "파일 저장", FileDialog.SAVE)
-                    dialog.file = defaultName
-                    dialog.isVisible = true
-                    val dir = dialog.directory
-                    val file = dialog.file
-                    val resultIntent = if (dir != null && file != null) {
-                        Intent().setData(Uri.fromFile(File(dir, file)))
-                    } else null
+                    // Show the dialog on the AWT event thread (a worker thread that blocks on it), like the tree picker.
+                    var chosen: File? = null
+                    SwingUtilities.invokeAndWait {
+                        val owner = android.app.engHubMainWindow()
+                        android.app.logEngHubEvent("save-dialog", "owner=${owner?.javaClass?.simpleName}")
+                        val dialog = FileDialog(owner as? Frame, "파일 저장", FileDialog.SAVE)
+                        // 윈도우의 기본 파일 대화상자는 부모를 무시하고 임시 창을 소유자로 삼아 메인 창 뒤로 깔리거나
+                        // 다른 모니터에 뜬다(사용자 신고: 앱이 멈춘 것처럼 보임). 위치를 직접 잡고 항상 위로 올린다.
+                        runCatching { owner?.let { dialog.setLocationRelativeTo(it) } }
+                        runCatching { dialog.isAlwaysOnTop = true }
+                        dialog.file = defaultName
+                        dialog.isVisible = true
+                        android.app.logEngHubEvent("save-dialog-closed", "dir=${dialog.directory} file=${dialog.file}")
+                        val dir = dialog.directory
+                        val file = dialog.file
+                        if (dir != null && file != null) chosen = File(dir, file)
+                    }
+                    val resultIntent = chosen?.let { Intent().setData(Uri.fromFile(it)) }
                     val code = if (resultIntent != null) Activity.RESULT_OK else Activity.RESULT_CANCELED
                     val parsed = contract.parseResult(code, resultIntent)
                     SwingUtilities.invokeLater { onResult(parsed) }
@@ -88,7 +98,7 @@ class ManagedActivityResultLauncher<I, O>(
                             fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
                             isAcceptAllFileFilterUsed = false
                         }
-                        if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) {
+                        if (chooser.showOpenDialog(android.app.engHubMainWindow()) == JFileChooser.APPROVE_OPTION) {
                             chosen = chooser.selectedFile
                         }
                     }
@@ -102,15 +112,23 @@ class ManagedActivityResultLauncher<I, O>(
                 val createdIntent = contract.createIntent(android.app.Application.instance, input)
                 val multiple = createdIntent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
                 Thread {
-                    val dialog = FileDialog(null as Frame?, "파일 선택", FileDialog.LOAD)
-                    dialog.isMultipleMode = multiple
-                    dialog.isVisible = true
-                    val files = if (multiple) {
-                        dialog.files?.toList().orEmpty()
-                    } else {
-                        val d = dialog.directory
-                        val f = dialog.file
-                        if (d != null && f != null) listOf(File(d, f)) else emptyList()
+                    var files: List<File> = emptyList()
+                    SwingUtilities.invokeAndWait {
+                        val owner = android.app.engHubMainWindow()
+                        android.app.logEngHubEvent("open-dialog", "owner=${owner?.javaClass?.simpleName} multiple=$multiple")
+                        val dialog = FileDialog(owner as? Frame, "파일 선택", FileDialog.LOAD)
+                        runCatching { owner?.let { dialog.setLocationRelativeTo(it) } }
+                        runCatching { dialog.isAlwaysOnTop = true }
+                        dialog.isMultipleMode = multiple
+                        dialog.isVisible = true
+                        android.app.logEngHubEvent("open-dialog-closed", "dir=${dialog.directory} files=${dialog.files?.size}")
+                        files = if (multiple) {
+                            dialog.files?.toList().orEmpty()
+                        } else {
+                            val d = dialog.directory
+                            val f = dialog.file
+                            if (d != null && f != null) listOf(File(d, f)) else emptyList()
+                        }
                     }
                     val resultIntent = if (files.isNotEmpty()) {
                         val uris = files.map { Uri.fromFile(it) }

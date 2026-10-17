@@ -131,12 +131,11 @@ private fun DrawerItem(label: String, icon: androidx.compose.ui.graphics.vector.
     }
 }
 
-/** The slim bar above every screen: the menu button, the current tab's icon and name, and the app info button. */
+/** The slim bar above every screen: the current tab's icon and name, and the app info button. */
 @Composable
-private fun TopBar(tab: AppTab, onMenu: () -> Unit, onInfo: () -> Unit) {
-    Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).height(48.dp).padding(horizontal = 4.dp)) {
-        BarButton(androidx.compose.material.icons.Icons.Outlined.Menu, "메뉴 열기", onMenu, Modifier.align(Alignment.CenterStart))
-        Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
+private fun TopBar(tab: AppTab, onInfo: () -> Unit) {
+    Box(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 16.dp)) {
+        Row(Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
             androidx.compose.material3.Icon(tab.icon, null, Modifier.size(20.dp), tint = Blue)
             Text(tab.label, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Ink, modifier = Modifier.padding(start = 8.dp))
         }
@@ -155,14 +154,14 @@ private fun BarButton(icon: androidx.compose.ui.graphics.vector.ImageVector, des
 }
 
 /**
- * The tabs of the app, reached from the left menu (the ☰ button, or a swipe from the left edge); the screen of the selected tab is drawn by [content].
- * The menu is open when the app starts ([openMenuAtStart]: not when another app sent something to a particular tab), and a popup at start asks to update while a newer release is not installed.
+ * Design A desktop shell: a permanent left sidebar (the [AppDrawer]), the selected tab's screen on the right, and a
+ * top bar. The drawer is always visible — not the Android slide-in menu — and a native menu bar / tray (added in
+ * `Main.kt`) drive the same navigation through [DesktopNav]. A popup at start asks to update while a newer release
+ * is not installed.
  */
 @Composable
-fun AppRoot(tab: AppTab, onTab: (AppTab) -> Unit, onOpenUrl: (String) -> Unit, openMenuAtStart: Boolean = false, content: @Composable (AppTab) -> Unit) {
+fun AppRoot(tab: AppTab, onTab: (AppTab) -> Unit, onOpenUrl: (String) -> Unit, content: @Composable (AppTab) -> Unit) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val drawer = rememberDrawerState(if (openMenuAtStart) DrawerValue.Open else DrawerValue.Closed)
     var aboutOpen by remember { mutableStateOf(false) }
     var newer by remember { mutableStateOf(UpdateChecker.available(context)) }
     var updatePrompt by remember { mutableStateOf(false) }
@@ -171,24 +170,22 @@ fun AppRoot(tab: AppTab, onTab: (AppTab) -> Unit, onOpenUrl: (String) -> Unit, o
         newer = UpdateChecker.check(context)
         if (newer != null) updatePrompt = true
     }
-    BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
+    // The menu bar / tray can ask for the app-info dialog.
+    LaunchedEffect(DesktopNav.aboutRequest) {
+        if (DesktopNav.aboutRequest > 0) aboutOpen = true
+    }
     EnglishStudyTheme {
-        ModalNavigationDrawer(
-            drawerState = drawer,
-            scrimColor = Color.Black.copy(alpha = 0.32f),
-            drawerContent = {
-                AppDrawer(
-                    tab, newer != null,
-                    onTab = { next -> scope.launch { drawer.close() }; onTab(next) },
-                    onInfo = { scope.launch { drawer.close() }; aboutOpen = true }
-                )
-            }
-        ) {
-            Scaffold(containerColor = Canvas, topBar = {
-                TopBar(tab, onMenu = { scope.launch { drawer.open() } }, onInfo = { aboutOpen = true })
-            }) { inner: PaddingValues ->
-                Column(Modifier.fillMaxSize().padding(inner).consumeWindowInsets(inner).imePadding()) {
-                    Box(Modifier.weight(1f).fillMaxWidth()) { content(tab) }
+        Row(Modifier.fillMaxSize()) {
+            AppDrawer(
+                tab, newer != null,
+                onTab = { next -> onTab(next) },
+                onInfo = { aboutOpen = true }
+            )
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                Scaffold(containerColor = Canvas, topBar = { TopBar(tab, onInfo = { aboutOpen = true }) }) { inner: PaddingValues ->
+                    Column(Modifier.fillMaxSize().padding(inner).consumeWindowInsets(inner).imePadding()) {
+                        Box(Modifier.weight(1f).fillMaxWidth()) { content(tab) }
+                    }
                 }
             }
         }

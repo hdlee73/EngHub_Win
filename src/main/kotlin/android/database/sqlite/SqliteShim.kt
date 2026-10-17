@@ -23,6 +23,10 @@ class SQLiteDatabase private constructor(val connection: Connection, val path: S
         }
 
         fun openDatabase(path: String, factory: CursorFactory?, flags: Int): SQLiteDatabase {
+            // ":memory:" must be a real in-memory database, not a file literally named ":memory:".
+            if (path == ":memory:") {
+                return SQLiteDatabase(DriverManager.getConnection("jdbc:sqlite::memory:"), ":memory:")
+            }
             val file = File(path)
             if (flags == OPEN_READONLY && !file.exists()) {
                 throw IllegalStateException("Database does not exist: $path")

@@ -54,6 +54,7 @@ import com.hdlee73.englishstudy.study.SavedWordSentences
 import com.hdlee73.englishstudy.study.StudyViewModel
 import com.hdlee73.englishstudy.ui.AppRoot
 import com.hdlee73.englishstudy.ui.AppTab
+import com.hdlee73.englishstudy.ui.DesktopNav
 import com.hdlee73.englishstudy.ui.DictionaryScreen
 import com.hdlee73.englishstudy.ui.FlashcardScreen
 import com.hdlee73.englishstudy.ui.QuizScreen
@@ -75,7 +76,6 @@ class MainActivity : AppCompatActivity() {
     /** Bumped when a DocVoice notification is tapped, so the DocVoice tab comes to the front. */
     private var docVoiceRequest by mutableStateOf(0)
     private var hasOpenDialog = false
-    private var openMenuAtStart = false
     /** A word sent by another app (Everynote's 단어장): the dictionary tab searches it and offers a way back to [returnPackage]. */
     private data class ExternalLookup(val word: String, val returnPackage: String?, val serial: Long = System.nanoTime())
     private var externalLookup by mutableStateOf<ExternalLookup?>(null)
@@ -102,14 +102,12 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        DesktopNav.attach(this)
         if (savedInstanceState == null && ListeningLink.isForListening(intent)) listeningIntent = intent
         if (savedInstanceState == null) DocVoiceLink.sharedYoutubeUrl(intent)?.let(docVoiceVm::openYoutube)
         if (savedInstanceState == null && DocVoiceLink.isForDocVoice(intent)) docVoiceRequest++
         if (savedInstanceState == null) readExternalLookup(intent)
         if (savedInstanceState == null) readSharedText(intent)
-        // A fresh start shows the left menu so the user sees what the app has; not when another app sent something to a tab.
-        openMenuAtStart = savedInstanceState == null && listeningIntent == null && docVoiceRequest == 0 &&
-            externalLookup == null && sharedText == null && DocVoiceLink.sharedYoutubeUrl(intent) == null
         // Fetches each new BBC 6 Minute English episode into the Listening tab's "6min" folder.
         com.hdlee73.englishstudy.listening.SixMinuteEnglish.schedule(applicationContext)
         // Tells the user (notification and app info) when GitHub has a newer release.
@@ -138,7 +136,7 @@ class MainActivity : AppCompatActivity() {
             val reading by readingVm.state.collectAsStateWithLifecycle()
             val translation by translateVm.state.collectAsStateWithLifecycle()
 
-            var tabIndex by rememberSaveable { mutableStateOf(0) }
+            var tabIndex by rememberSaveable { mutableStateOf(DesktopNav.restoreTab(AppTab.DICTIONARY).ordinal) }
             // The tab a dictionary lookup was started from, so the dictionary can offer a way back to it.
             var returnTab by rememberSaveable { mutableStateOf<Int?>(null) }
             // Modification (3): Timestamp in Listening to seek & resume when returning from Dictionary word lookup.
@@ -182,6 +180,7 @@ class MainActivity : AppCompatActivity() {
             SideEffect {
                 currentTab = tab
                 hasOpenDialog = settingsOpen || datasetsOpen || learning.editingDataset != null
+                DesktopNav.markCurrent(tab)
             }
 
             val filePicker = rememberLauncherForActivityResult(com.hdlee73.englishstudy.ui.FilePick.Multiple()) { uris ->
@@ -221,6 +220,13 @@ class MainActivity : AppCompatActivity() {
                     WorkManager.getInstance(this@MainActivity).enqueue(request)
                     dictionaryVm.showMessage("파일 저장을 백그라운드에서 시작했습니다.")
                 }
+            }
+
+            // 듣기 전 헤더에도 실제로 쓸 마이크 이름을 보여 준다(설정을 바꾸면 바로 갱신).
+            LaunchedEffect(learning.settings.bluetoothInputAddress, learning.settings.phoneMic) {
+                speech.phoneMic = learning.settings.phoneMic
+                speech.bluetoothInputAddress = learning.settings.bluetoothInputAddress
+                learningVm.onMicrophoneChanged(speech.plannedInputLabel())
             }
 
             LaunchedEffect(learning.phase, learning.position, learning.listenRequestId, learning.promptRequestId) {
@@ -339,6 +345,13 @@ class MainActivity : AppCompatActivity() {
                 tabIndex = next.ordinal
             }
 
+            // The desktop shell (native menu bar, tray, keyboard shortcuts) drives navigation through DesktopNav.
+            var pendingTab by remember { mutableStateOf<AppTab?>(null) }
+            LaunchedEffect(Unit) { DesktopNav.onSelect = { pendingTab = it } }
+            LaunchedEffect(pendingTab) {
+                pendingTab?.let { switchTab(it); pendingTab = null }
+            }
+
             // The tabs visited before this one, so the back key (Esc on Windows) goes to the previous screen.
             val history = remember { mutableStateListOf<Int>() }
             var previousTab by remember { mutableStateOf(tabIndex) }
@@ -382,8 +395,7 @@ class MainActivity : AppCompatActivity() {
             AppRoot(
                 tab = tab,
                 onOpenUrl = { openUrl(it) },
-                onTab = { next -> switchTab(next) },
-                openMenuAtStart = openMenuAtStart
+                onTab = { next -> switchTab(next) }
             ) { selected ->
                 when (selected) {
                     AppTab.DICTIONARY -> androidx.compose.foundation.layout.Column(androidx.compose.ui.Modifier.fillMaxSize()) {

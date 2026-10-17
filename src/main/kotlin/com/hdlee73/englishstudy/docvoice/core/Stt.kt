@@ -114,7 +114,8 @@ object Stt {
                     whisper = OfflineWhisperModelConfig(
                         encoder = wf.encoder.path,
                         decoder = wf.decoder.path,
-                        language = opts.language,
+                        // English-only models take no language.
+                        language = if (opts.size.englishOnly) "" else opts.language,
                         task = "transcribe",
                         tailPaddings = 1000,
                     ),
@@ -195,7 +196,11 @@ object Stt {
             )
         )
         try {
-            val result = sd.process(pcm.toFloats())
+            // sherpa-onnx's diarizer takes the whole recording in one FloatArray, so there is no chunked API to use.
+            // Cap the input to MAX_DIARIZE_SECONDS: a longer recording is silently limited here (the caller already
+            // refuses longer input and shows a note), which keeps the float copy bounded (~192MB at the cap).
+            val total = minOf(pcm.size, MAX_DIARIZE_SECONDS * AudioDecoder.SAMPLE_RATE)
+            val result = sd.process(pcm.toFloats(0, total))
             return result.map { Triple(it.start.toDouble(), it.end.toDouble(), it.speaker) }
         } finally {
             sd.release()

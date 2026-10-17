@@ -176,7 +176,10 @@ class Intent(
     fun getLongExtra(name: String, defaultValue: Long): Long = extras.getLong(name, defaultValue)
     @Suppress("UNCHECKED_CAST")
     fun getStringArrayExtra(name: String): Array<String>? = arrayExtras[name] as? Array<String>
+    fun getStringArrayListExtra(name: String): ArrayList<String>? = extras.getStringArrayList(name)
     fun getCharSequenceExtra(name: String): CharSequence? = extras.getString(name)
+    /** Returns a non-primitive extra such as the audio-source pipe (see [putExtra] with an `Any?` value). */
+    fun getParcelableExtra(name: String): Any? = arrayExtras[name]
     fun removeExtra(name: String) {
         extras.putString(name, null)
         arrayExtras.remove(name)
@@ -264,7 +267,7 @@ class ContentResolver {
     fun insert(url: Uri, values: ContentValues): Uri? {
         val displayName = values.getAsString(MediaStore.MediaColumns.DISPLAY_NAME) ?: "output"
         val relPath = values.getAsString(MediaStore.MediaColumns.RELATIVE_PATH) ?: "Downloads"
-        val baseDir = File(System.getProperty("user.home"), relPath).apply { mkdirs() }
+        val baseDir = File(Context.publicRoot, relPath).apply { mkdirs() }
         var target = File(baseDir, displayName)
         var counter = 1
         val base = displayName.substringBeforeLast('.', displayName)
@@ -333,7 +336,9 @@ internal class FileSharedPreferences(private val file: File) : SharedPreferences
     private fun loadFromDisk() {
         if (!file.exists()) return
         runCatching {
-            val json = JSONObject(file.readText(Charsets.UTF_8))
+            // 메모장 등으로 손으로 고친 파일에는 UTF-8 BOM 이 붙을 수 있다. 그대로 파싱하면 예외가 나서
+            // runCatching 에 먹혀 모든 설정이 조용히 사라지므로, 먼저 BOM 을 떼어 낸다.
+            val json = JSONObject(file.readText(Charsets.UTF_8).removePrefix("\uFEFF"))
             for (key in json.keys()) {
                 when (val v = json.get(key)) {
                     is JSONArray -> {
@@ -362,7 +367,22 @@ internal class FileSharedPreferences(private val file: File) : SharedPreferences
                     json.put(k, v)
                 }
             }
-            file.writeText(json.toString(2), Charsets.UTF_8)
+            val text = json.toString(2)
+            // Write to a temp file and swap it in atomically, so a crash mid-write cannot leave a truncated
+            // (unparseable) file that would silently reset every setting on the next start.
+            val tmp = File(file.parentFile, file.name + ".tmp")
+            tmp.writeText(text, Charsets.UTF_8)
+            val moved = runCatching {
+                java.nio.file.Files.move(
+                    tmp.toPath(), file.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE
+                )
+            }.isSuccess
+            if (!moved) {
+                file.writeText(text, Charsets.UTF_8)
+                tmp.delete()
+            }
         }
     }
 
@@ -486,6 +506,15 @@ open class Context {
             val custom = System.getProperty("enghub.home")
             val dir = if (!custom.isNullOrBlank()) File(custom) else File(System.getProperty("user.home"), ".enghub")
             dir.apply { mkdirs() }
+        }
+
+        /**
+         * The folder user-visible files (exports, downloads) go to. Matches [rootDir]'s override so a portable
+         * install (enghub.home) writes them beside the app data instead of the real home directory.
+         */
+        val publicRoot: File by lazy {
+            val custom = System.getProperty("enghub.home")
+            if (!custom.isNullOrBlank()) File(custom) else File(System.getProperty("user.home"))
         }
 
         private val prefsCache = ConcurrentHashMap<String, SharedPreferences>()

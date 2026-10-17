@@ -18,17 +18,14 @@ import androidx.core.app.NotificationCompat
 import com.hdlee73.englishstudy.docvoice.core.AudioDecoder
 import com.hdlee73.englishstudy.docvoice.core.ModelStore
 import com.hdlee73.englishstudy.docvoice.core.PcmBuffer
-import com.hdlee73.englishstudy.docvoice.core.Segment
 import com.hdlee73.englishstudy.docvoice.core.Storage
 import com.hdlee73.englishstudy.docvoice.core.Stt
 import com.hdlee73.englishstudy.docvoice.core.LiveLang
-import com.hdlee73.englishstudy.docvoice.core.LiveText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -90,101 +87,15 @@ class RecorderService : Service() {
         val sr = AudioDecoder.SAMPLE_RATE
         val store = ModelStore(this)
         val lang = LiveLang.of(RecorderHub.language)
-        val alive = { scope.isActive && !RecorderHub.stopRequested.get() }
 
-        withContext(Dispatchers.IO) {
-            store.ensureLive(lang, alive) { m, f -> prep(m, f) }
-        }
-        if (RecorderHub.stopRequested.get()) { RecorderHub.reset(); return }
-        prep("음성 인식 준비 중", null)
-        // 한·영 혼합: 두 언어 인식기를 동시에 돌려 문장마다 확신도가 높은 쪽을 채택
-        class Eng(val lang: LiveLang, val rec: com.k2fsa.sherpa.onnx.OnlineRecognizer) { val stream = rec.createStream() }
-        val engs = lang.members.map { Eng(it, Stt.newLive(store, it)) }
+        // 이 셰임의 sherpa-onnx 스트리밍 엔진(OnlineRecognizer)은 아무것도 하지 않으므로, 실시간으로
+        // 글자를 띄우는 대신 마이크로 녹음한 PCM 을 녹음이 끝난 뒤 Windows 음성 인식기(SAPI)로 받아쓴다.
+        // 파일 변환(MP3→문서)과 같은 경로라서 실제로 글자가 나온다. 준비할 모델도 없다.
+        prep("녹음 준비 중", null)
 
-        val pcm = PcmBuffer(sr * 60 * 5)
+        // 무한 녹음으로 메모리가 터지지 않게 상한을 둔다. 다 차면 [pcm.full] 이 서고 아래 캡처 루프가 멈춘다.
+        val pcm = PcmBuffer(sr * 60 * 5, sr * MAX_RECORD_SECONDS)
         RecorderHub.pcm = pcm
-        val queue = Channel<FloatArray>(Channel.UNLIMITED)
-        val segments = ArrayList<Segment>()
-        // 한·영 혼합: 문장이 끝날 때마다 Whisper(다국어)로 다시 인식해 글자를 교체한다 (화면엔 먼저 빠른 결과가 보임)
-        val mix = lang == LiveLang.MIX
-        val refineQ = Channel<Triple<Int, Double, Double>>(Channel.UNLIMITED)
-        val refineJob = if (!mix) null else scope.launch(Dispatchers.Default) {
-            try {
-                val wr = Stt.newRecognizer(store, com.hdlee73.englishstudy.docvoice.core.SttOptions("", com.hdlee73.englishstudy.docvoice.core.WhisperSize.SMALL, false), 2)
-                try {
-                    for ((idx, a, b) in refineQ) {
-                        val from = ((a - 0.3).coerceAtLeast(0.0) * sr).toInt()
-                        val to = minOf(((b + 0.3) * sr).toInt(), pcm.size)
-                        if (to - from < sr / 2) continue
-                        val seg = Stt.decodeSegment(wr, pcm.toFloats(from, to), from) ?: continue
-                        synchronized(segments) {
-                            if (idx < segments.size) segments[idx] = segments[idx].copy(text = LiveText.format(seg.text, "ko", true))
-                            RecorderHub.upd { copy(segments = segments.toList()) }
-                        }
-                    }
-                } finally { wr.release() }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Throwable) {}
-        }
-
-        // 인식 워커: 녹음 스레드와 분리해 오디오가 끊기지 않게 한다.
-        var workerError: String? = null
-        val worker = scope.launch(Dispatchers.Default) {
-          try {
-            var fed = 0L
-            var segStart = 0.0
-            var lastEnd = 0.0
-            var active = false
-            fun decodeAll() { for (e in engs) while (e.rec.isReady(e.stream)) e.rec.decode(e.stream) }
-            // 가장 그럴듯한 후보 (텍스트, 언어키). 확신도(평균 로그확률)가 가장 높은 쪽.
-            fun best(): Pair<String, String> {
-                var bt = ""; var bl = engs[0].lang.key; var bs = Double.NEGATIVE_INFINITY
-                for (e in engs) {
-                    val r = e.rec.getResult(e.stream)
-                    if (r.text.isBlank()) continue
-                    val sc = if (r.ysProbs.isNotEmpty()) r.ysProbs.average() else -r.text.length * 0.01
-                    if (sc > bs || bt.isEmpty()) { bs = sc; bt = r.text; bl = e.lang.key }
-                }
-                return bt to bl
-            }
-            fun finalizeSegment(now: Double) {
-                val (raw, lk) = best()
-                val text = LiveText.format(raw, lk, true)
-                if (text.isNotEmpty()) {
-                    val idx = synchronized(segments) { segments.add(Segment(segStart, maxOf(now, segStart + 0.3), text)); segments.size - 1 }
-                    lastEnd = now
-                    if (mix) refineQ.trySend(Triple(idx, segStart, maxOf(now, segStart + 0.3)))
-                }
-                for (e in engs) e.rec.reset(e.stream)
-                active = false
-                synchronized(segments) { RecorderHub.upd { copy(segments = segments.toList(), partial = "", speaking = false) } }
-            }
-            for (chunk in queue) {
-                for (e in engs) e.stream.acceptWaveform(chunk, sr)
-                fed += chunk.size
-                decodeAll()
-                val now = fed / sr.toDouble()
-                val (raw, lk) = best()
-                if (raw.isNotBlank() && !active) { active = true; segStart = maxOf(lastEnd, now - 0.5) }
-                if (engs.any { it.rec.isEndpoint(it.stream) }) {
-                    finalizeSegment(now)
-                } else {
-                    val part = LiveText.format(raw, lk, false)
-                    RecorderHub.upd { copy(partial = part, speaking = part.isNotEmpty()) }
-                }
-            }
-            // 마무리: 남은 꼬리 처리
-            for (e in engs) { e.stream.acceptWaveform(FloatArray(sr / 2), sr); e.stream.inputFinished() }
-            decodeAll()
-            finalizeSegment(fed / sr.toDouble())
-          } catch (e: CancellationException) {
-            throw e
-          } catch (e: Throwable) {
-            workerError = "인식 오류: ${e.message ?: e.javaClass.simpleName}"
-            for (ignored in queue) { }
-          }
-        }
 
         val minBuf = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val route = routeInput(RecorderHub.bluetooth)
@@ -195,9 +106,10 @@ class RecorderService : Service() {
         route.device?.let { rec.preferredDevice = it }
         RecorderHub.upd { copy(source = route.name) }
         if (rec.state != AudioRecord.STATE_INITIALIZED) {
-            rec.release(); queue.close(); worker.cancel(); refineQ.close(); refineJob?.cancel(); engs.forEach { it.stream.release(); it.rec.release() }; route.cleanup()
+            rec.release(); route.cleanup()
             throw IllegalStateException("마이크를 시작할 수 없습니다.")
         }
+        var captureNotice: String? = null
         try {
             rec.startRecording()
             RecorderHub.upd { copy(phase = RecPhase.Recording, message = null, fraction = null) }
@@ -213,15 +125,13 @@ class RecorderService : Service() {
                         continue
                     }
                     var sum = 0.0
-                    val f = FloatArray(n)
                     for (i in 0 until n) {
                         pcm.add(buf[i])
-                        f[i] = buf[i] / 32768f
-                        sum += f[i] * f[i]
-                        val a = kotlin.math.abs(f[i])
+                        val v = buf[i] / 32768f
+                        sum += v * v
+                        val a = kotlin.math.abs(v)
                         if (a > peak) peak = a
                     }
-                    queue.trySend(f)
                     val rms = sqrt(sum / n).toFloat()
                     RecorderHub.upd { copy(phase = RecPhase.Recording, seconds = pcm.seconds, level = (rms * 6f).coerceIn(0f, 1f), peak = peak) }
                     val now = System.currentTimeMillis()
@@ -229,6 +139,8 @@ class RecorderService : Service() {
                         lastNotify = now
                         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notification(fmt(pcm.seconds)))
                     }
+                    // 상한(MAX_RECORD_SECONDS)까지 다 녹음했으면 여기서 멈추고 사용자에게 알린다.
+                    if (pcm.full) { captureNotice = MAX_RECORD_MESSAGE; break }
                 }
             }
         } finally {
@@ -237,15 +149,38 @@ class RecorderService : Service() {
             route.cleanup()
         }
 
-        RecorderHub.upd { copy(phase = RecPhase.Finishing, message = null, level = 0f) }
-        queue.close()
-        worker.join()
-        refineQ.close()
-        refineJob?.join()
-        engs.forEach { it.stream.release(); it.rec.release() }
+        // 녹음이 끝났으면 Windows 음성 인식기(SAPI)로 받아쓴다. 파일 변환(MP3→문서)과 같은 경로라서 실제로 글이 나온다.
+        if (pcm.size <= 0) {
+            RecorderHub.upd { copy(phase = RecPhase.Failed, level = 0f, message = "녹음된 소리가 없어요.") }
+            return
+        }
+        // 녹음이 끝났으면 Windows 음성 인식기(SAPI)로 받아쓴다. 인식기가 없는 PC(Windows 11 24H2 이후 기본 미포함)에서는
+        // 결과가 비어 나오므로, 조용히 실패하지 않고 원인을 알린다.
+        if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
+            RecorderHub.upd {
+                copy(
+                    phase = RecPhase.Failed, level = 0f, fraction = null,
+                    message = "이 PC에는 Windows 음성 인식 엔진이 없어 받아쓰기를 할 수 없습니다. 도움말 → 음성 인식 엔진 설치 안내를 확인해 주세요.",
+                )
+            }
+            return
+        }
+        RecorderHub.upd { copy(phase = RecPhase.Finishing, message = "받아쓰는 중", level = 0f, fraction = 0f) }
+        val stt = try {
+            Stt.transcribe(
+                store, pcm,
+                com.hdlee73.englishstudy.docvoice.core.SttOptions(if (lang == LiveLang.KO) "ko" else "", com.hdlee73.englishstudy.docvoice.core.WhisperSize.SMALL, false),
+                { scope.isActive },
+            ) { m, f -> RecorderHub.upd { copy(message = m, fraction = f) } }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            RecorderHub.upd { copy(phase = RecPhase.Failed, level = 0f, fraction = null, message = "받아쓰기 오류: ${e.message ?: e.javaClass.simpleName}") }
+            return
+        }
 
         val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
-        RecorderHub.upd { copy(phase = RecPhase.Stopped, seconds = pcm.seconds, segments = segments.toList(), wav = null, message = workerError, title = "녹음_$stamp") }
+        RecorderHub.upd { copy(phase = RecPhase.Stopped, seconds = pcm.seconds, segments = stt.segments, wav = null, fraction = null, message = captureNotice, title = "녹음_$stamp") }
     }
 
     private class Route(val bt: Boolean, val name: String, val device: android.media.AudioDeviceInfo?, val cleanup: () -> Unit)
@@ -254,8 +189,12 @@ class RecorderService : Service() {
     private suspend fun routeInput(useBt: Boolean): Route {
         val am = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
         val inputs = try { am.getDevices(android.media.AudioManager.GET_DEVICES_INPUTS).toList() } catch (_: Exception) { emptyList() }
-        val builtin = inputs.firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC }
-        val builtinRoute = Route(false, "내장 마이크", builtin) {}
+        // Windows 기본 입력 장치가 소리를 내보내지 않는 PC 가 있어(사용자 PC 의 USB 마이크), 앱 시작 때 확인해 둔
+        // 소리가 실제로 들어오는 장치를 우선 쓴다. 없으면 Windows 기본(내장) 마이크를 쓴다.
+        val working = android.media.AudioDevices.autoInputDevice()
+        val builtin = working ?: inputs.firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC }
+        val builtinName = working?.productName?.toString()?.takeIf { it.isNotBlank() } ?: "내장 마이크"
+        val builtinRoute = Route(false, builtinName, builtin) {}
         if (!useBt) return builtinRoute
         val bt = inputs.firstOrNull {
             it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
@@ -324,5 +263,8 @@ class RecorderService : Service() {
         const val ACTION_PAUSE = "com.hdlee73.englishstudy.docvoice.REC_PAUSE"
         private const val CHANNEL = "rec"
         private const val NOTIF_ID = 3
+        /** 한 번에 녹음할 수 있는 최대 길이(초). 넘으면 자동으로 멈추고 알린다. */
+        private const val MAX_RECORD_SECONDS = 60 * 60
+        private const val MAX_RECORD_MESSAGE = "녹음 최대 길이(60분)에 도달해 자동으로 멈췄어요."
     }
 }

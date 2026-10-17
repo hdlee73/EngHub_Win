@@ -15,7 +15,6 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import java.io.ByteArrayOutputStream
-import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -55,8 +54,7 @@ class EdgeTts(private val client: OkHttpClient = defaultClient()) {
     companion object {
         private const val BASE = "speech.platform.bing.com/consumer/speech/synthesize/readaloud"
         private const val TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
-        private const val CHROMIUM_FULL = "143.0.3650.75"
-        private const val WIN_EPOCH = 11644473600L
+        private const val CHROMIUM_FULL = SecMsGec.CHROMIUM_FULL
 
         @Volatile
         private var clockSkewSeconds = 0L
@@ -67,13 +65,9 @@ class EdgeTts(private val client: OkHttpClient = defaultClient()) {
             .pingInterval(20, TimeUnit.SECONDS)
             .build()
 
-        internal fun secMsGec(nowMillis: Long = System.currentTimeMillis()): String {
-            var t = nowMillis / 1000 + clockSkewSeconds + WIN_EPOCH
-            t -= t % 300
-            val ticks = t * 10_000_000L
-            val digest = MessageDigest.getInstance("SHA-256").digest("$ticks$TOKEN".toByteArray(Charsets.US_ASCII))
-            return digest.joinToString("") { String.format(Locale.ROOT, "%02X", it) }
-        }
+        /** 서버가 요구하는 Sec-MS-GEC(v2) 토큰. 계산은 [SecMsGec] 에 있다. */
+        internal fun secMsGec(nowMillis: Long = System.currentTimeMillis()): String =
+            SecMsGec.generate(TOKEN, nowMillis, clockSkewSeconds)
 
         private fun jsDate(): String {
             val f = SimpleDateFormat("EEE MMM dd yyyy HH:mm:ss", Locale.ENGLISH)
@@ -114,7 +108,7 @@ class EdgeTts(private val client: OkHttpClient = defaultClient()) {
             var finished = false
             val url = "wss://$BASE/edge/v1?TrustedClientToken=$TOKEN" +
                 "&ConnectionId=${UUID.randomUUID().toString().replace("-", "")}" +
-                "&Sec-MS-GEC=${secMsGec()}&Sec-MS-GEC-Version=1-$CHROMIUM_FULL"
+                "&Sec-MS-GEC=${secMsGec()}&Sec-MS-GEC-Version=${SecMsGec.version}"
             val major = CHROMIUM_FULL.substringBefore('.')
             val request = Request.Builder().url(url)
                 .header("Pragma", "no-cache")
@@ -207,7 +201,7 @@ class EdgeTts(private val client: OkHttpClient = defaultClient()) {
                 }
             }
         }
-        throw TtsException("음성 합성에 실패했습니다. 인터넷 연결을 확인하세요. (${last?.message})")
+        throw TtsException("음성 합성에 실패했습니다. 인터넷 연결과 PC 시계를 확인해 주세요. (${last?.message})")
     }
 
     private fun adjustSkew(serverDate: String) {

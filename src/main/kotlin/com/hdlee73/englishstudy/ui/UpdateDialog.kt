@@ -34,19 +34,23 @@ fun UpdateDialog(release: UpdateChecker.Release, onOpenUrl: (String) -> Unit, on
     var error by remember { mutableStateOf<String?>(null) }
     val busy = progress != null && file == null
 
-    fun start() {
-        error = null
-        file?.let { apk ->
-            if (UpdateInstaller.canInstall(ctx)) UpdateInstaller.install(ctx, apk) else UpdateInstaller.openInstallPermissionSettings(ctx)
+    fun launchInstall(apk: File) {
+        if (!UpdateInstaller.canInstall(ctx)) {
+            UpdateInstaller.openInstallPermissionSettings(ctx)
             return
         }
+        if (!UpdateInstaller.install(ctx, apk)) {
+            error = "설치 프로그램을 시작하지 못했어요. ‘다시 받기’를 눌러 주세요."
+        }
+    }
+
+    fun start() {
+        error = null
+        file?.let { apk -> launchInstall(apk); return }
         progress = -1f
         scope.launch {
             runCatching { UpdateInstaller.download(ctx, release) { progress = it } }
-                .onSuccess { apk ->
-                    file = apk
-                    if (UpdateInstaller.canInstall(ctx)) UpdateInstaller.install(ctx, apk) else UpdateInstaller.openInstallPermissionSettings(ctx)
-                }
+                .onSuccess { apk -> file = apk; launchInstall(apk) }
                 .onFailure { progress = null; error = it.message ?: "다운로드에 실패했어요" }
         }
     }

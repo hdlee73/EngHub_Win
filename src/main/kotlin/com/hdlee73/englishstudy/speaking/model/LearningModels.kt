@@ -74,7 +74,7 @@ data class LearningUiState(
     val feedbackSuccess: Boolean? = null,
     val promptRequestId: Long = 0L,
     val listenRequestId: Long = 0L,
-    val microphoneLabel: String = "휴대전화 마이크",
+    val microphoneLabel: String = "Windows 기본 마이크",
     val remainingSeconds: Int = 0,
     val statistics: List<DailyLearning> = emptyList(),
     val message: String? = null

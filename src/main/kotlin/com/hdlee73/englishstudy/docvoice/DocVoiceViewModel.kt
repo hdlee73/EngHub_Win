@@ -62,7 +62,10 @@ class DocVoiceViewModel(private val app: Application) : AndroidViewModel(app) {
     var format by mutableStateOf(prefs.getString("format", "xlsx")!!)
     var language by mutableStateOf(prefs.getString("language", "")!!)
     var size by mutableStateOf(runCatching { WhisperSize.valueOf(prefs.getString("size", "SMALL")!!) }.getOrDefault(WhisperSize.SMALL))
-    var diarize by mutableStateOf(prefs.getBoolean("diarize", true))
+    /**
+     * 화자 구분(발화자 분리)은 Windows 셰임에 엔진이 없어 쓸 수 없다. 설정에 남아 있는 값과 무관하게 끈다.
+     */
+    var diarize by mutableStateOf(false)
     var includeTime by mutableStateOf(prefs.getBoolean("includeTime", true))
     var showSpeaker by mutableStateOf(prefs.getBoolean("showSpeaker", true))
     var gap by mutableFloatStateOf(prefs.getFloat("gap", 1.5f))
@@ -91,12 +94,6 @@ class DocVoiceViewModel(private val app: Application) : AndroidViewModel(app) {
         ContextCompat.startForegroundService(app, Intent(app, JobService::class.java))
     }
 
-    fun liveReady(lang: String) = com.hdlee73.englishstudy.docvoice.core.ModelStore(app).liveReady(com.hdlee73.englishstudy.docvoice.core.LiveLang.of(lang))
-
-    fun downloadModel() {
-        launch(JobRequest.ModelDownload(com.hdlee73.englishstudy.docvoice.core.LiveLang.of(recLang)))
-    }
-
     fun startTts() {
         val f = ttsFile ?: return
         launch(JobRequest.Tts(f, koVoice, enVoice, speed.toDouble(), Storage.cleanName(ttsName, "mp3")))
@@ -114,8 +111,8 @@ class DocVoiceViewModel(private val app: Application) : AndroidViewModel(app) {
         val f = sttFile ?: return
         launch(
             JobRequest.Stt(
-                f, format, SttOptions(language, size, diarize), gap.toDouble(),
-                includeTime, showSpeaker && diarize, Storage.cleanName(sttName, format),
+                f, format, SttOptions(language, size, false), gap.toDouble(),
+                includeTime, false, Storage.cleanName(sttName, format),
             )
         )
     }
@@ -131,9 +128,10 @@ class DocVoiceViewModel(private val app: Application) : AndroidViewModel(app) {
     // ---- 녹음 ----
     val rec = RecorderHub.state
     var recFormat by mutableStateOf(prefs.getString("recFormat", "docx")!!)
+    /** 화자 구분·정밀 재인식(Whisper)은 Windows 셰임에 엔진이 없어 쓸 수 없다. 항상 끈다. */
     var recDiarize by mutableStateOf(false)
     var recRefine by mutableStateOf(false)
-    var recLang by mutableStateOf(prefs.getString("recLang", "en")!!)
+    var recLang by mutableStateOf(prefs.getString("recLang", "en")!!.takeIf { it == "ko" } ?: "en")
     var recBluetooth by mutableStateOf(prefs.getBoolean("recBt", true))
 
     fun startRecording() {
@@ -181,7 +179,8 @@ class DocVoiceViewModel(private val app: Application) : AndroidViewModel(app) {
     fun exportRecording() {
         val title = RecorderHub.state.value.title.ifBlank { "녹음" }
         prefs.edit().putString("recFormat", recFormat).putString("recLang", recLang).apply()
-        launch(JobRequest.RecExport(title, recFormat, recRefine, if (recLang == "mix") "" else recLang, size, recDiarize, gap.toDouble(), includeTime, showSpeaker && recDiarize))
+        // 정밀 재인식·화자 구분은 이 셰임에서 동작하지 않으므로 끈 채로 내보낸다.
+        launch(JobRequest.RecExport(title, recFormat, false, if (recLang == "mix") "" else recLang, size, false, gap.toDouble(), includeTime, false))
     }
 
     /** The folder files are saved to (kept in step with the folder picker). */

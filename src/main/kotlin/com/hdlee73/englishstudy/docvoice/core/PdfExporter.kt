@@ -15,13 +15,29 @@ object PdfExporter {
     private const val H = 842f
     private const val MARGIN = 56f
 
+    /** [exportDetailed] 의 결과. 글꼴에 없어 [replacedChars] 개 만큼 글자를 `?` 로 바꿨다. */
+    class PdfResult(val bytes: ByteArray, val replacedChars: Int)
+
     fun export(
         context: Context,
         paragraphs: List<Paragraph>,
         title: String,
         includeTime: Boolean,
         showSpeaker: Boolean,
-    ): ByteArray {
+    ): ByteArray = exportDetailed(context, paragraphs, title, includeTime, showSpeaker).bytes
+
+    /**
+     * PDF 를 만들어 바이트와 함께, 글꼴에 없어 `?` 로 대체한 글자 수를 돌려준다.
+     * 대체한 글자가 있으면 호출한 쪽에서 사용자에게 알릴 수 있다.
+     */
+    fun exportDetailed(
+        context: Context,
+        paragraphs: List<Paragraph>,
+        title: String,
+        includeTime: Boolean,
+        showSpeaker: Boolean,
+    ): PdfResult {
+        var replaced = 0
         PDDocument().use { doc ->
             val font = context.assets.open("fonts/NanumGothic-Regular.ttf").use { PDType0Font.load(doc, it) }
             val contentW = W - MARGIN * 2f
@@ -42,13 +58,19 @@ object PdfExporter {
             }
 
             fun drawLineText(text: String, size: Float, color: Color, yBaseline: Float) {
-                val safe = text.filter { ch -> ch >= ' ' && runCatching { font.encode(ch.toString()) }.isSuccess }
+                // 글꼴에 없는 글자는 버리지 않고 '?' 로 바꾸고 개수를 세어, 내용이 조용히 빠지지 않게 한다.
+                val safe = StringBuilder(text.length)
+                for (ch in text) {
+                    if (ch < ' ') continue
+                    if (runCatching { font.encode(ch.toString()) }.isSuccess) safe.append(ch)
+                    else { safe.append('?'); replaced++ }
+                }
                 if (safe.isEmpty()) return
                 stream.beginText()
                 stream.setFont(font, size)
                 stream.setNonStrokingColor(color)
                 stream.newLineAtOffset(MARGIN, yBaseline)
-                stream.showText(safe)
+                stream.showText(safe.toString())
                 stream.endText()
             }
 
@@ -104,7 +126,7 @@ object PdfExporter {
             stream.close()
             val out = ByteArrayOutputStream()
             doc.save(out)
-            return out.toByteArray()
+            return PdfResult(out.toByteArray(), replaced)
         }
     }
 }

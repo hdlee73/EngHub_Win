@@ -46,6 +46,10 @@ class EngHubWinHarnessTest {
         svc1.player.setMediaItems(listOf(entry), 0, 4200L)
         svc1.player.prepare()
 
+        // 준비(prepare)는 ExoPlayer 와 마찬가지로 비동기다. 디코딩이 끝나면 길이가 채워지므로,
+        // UI 가 하듯 상태를 기다렸다가 확인한다(즉시 읽으면 아직 0 일 수 있다).
+        val deadline = System.currentTimeMillis() + 10_000
+        while (svc1.player.duration <= 0L && System.currentTimeMillis() < deadline) Thread.sleep(20)
         assertEquals("Duration should be ~15000ms", 15000L, svc1.player.duration)
         assertEquals("Initial position should be preserved", 4200L, svc1.player.currentPosition)
 

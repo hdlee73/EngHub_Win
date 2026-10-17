@@ -60,15 +60,29 @@ class TextToSpeech(
         Thread(r, "EngHub-TTS").apply { isDaemon = true }
     }
 
-    val voices: Set<Voice> = setOf(
+    private val fallbackVoices = setOf(
         Voice("en-US-Default", Locale.US, 500, 50, false),
         Voice("en-GB-Default", Locale.UK, 500, 50, false),
         Voice("ko-KR-Default", Locale.KOREA, 500, 50, false)
     )
 
-    var voice: Voice? = voices.first()
+    /** (voice name, culture name) of the voices actually installed on this PC, enumerated once. */
+    private val installedVoices: List<Pair<String, String>> by lazy { queryInstalledVoices() }
+
+    /** The installed voices, or a small fallback set when none could be enumerated. */
+    val voices: Set<Voice>
+        get() = installedVoices.takeIf { it.isNotEmpty() }
+            ?.map { (name, culture) ->
+                Voice(name, runCatching { Locale.forLanguageTag(culture) }.getOrDefault(Locale.US), 500, 50, false)
+            }
+            ?.toSet()
+            ?: fallbackVoices
+
+    var voice: Voice? = fallbackVoices.first()
 
     init {
+        // Enumerate voices off the UI thread so setLanguage/setVoice can answer truthfully without a stall.
+        executor.submit { runCatching { installedVoices } }
         initListener?.let { listener ->
             SwingUtilities.invokeLater {
                 try {
@@ -80,14 +94,26 @@ class TextToSpeech(
         }
     }
 
+    /** Reports whether the PC really has a voice for [loc], so the app can warn instead of speaking gibberish. */
     fun setLanguage(loc: Locale?): Int {
         if (loc != null) currentLocale = loc
-        return LANG_COUNTRY_AVAILABLE
+        val wanted = loc ?: return LANG_COUNTRY_AVAILABLE
+        val installed = installedVoices
+        if (installed.isEmpty()) return LANG_COUNTRY_AVAILABLE   // could not enumerate: assume available
+        val tag = wanted.toLanguageTag().lowercase()
+        val language = tag.substringBefore('-')
+        return when {
+            installed.any { it.second.lowercase() == tag } -> LANG_COUNTRY_AVAILABLE
+            installed.any { it.second.lowercase().startsWith(language) } -> LANG_AVAILABLE
+            else -> LANG_MISSING_DATA
+        }
     }
 
     fun setVoice(v: Voice): Int {
-        voice = v
-        currentLocale = v.locale
+        val available = voices.firstOrNull { it.name == v.name } ?: voices.firstOrNull { it.locale == v.locale }
+            ?: return ERROR
+        voice = available
+        currentLocale = available.locale
         return SUCCESS
     }
 
@@ -123,10 +149,17 @@ class TextToSpeech(
             progressListener?.onStart(utteranceId)
             try {
                 val safeText = raw.replace("'", "''").replace("\r", " ").replace("\n", " ")
+                // Prefer the exact installed voice for the current language, so Korean is not read by an English voice.
+                val chosen = voice?.name?.takeIf { name -> installedVoices.any { it.first == name } }
+                val select = if (chosen != null) {
+                    "try { ${'$'}s.SelectVoice('${chosen.replace("'", "''")}') } catch {}"
+                } else {
+                    "try { ${'$'}s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::NotSet, [System.Speech.Synthesis.VoiceAge]::NotSet, 0, [System.Globalization.CultureInfo]::GetCultureInfo('$langHint')) } catch {}"
+                }
                 val cmd = """
                     Add-Type -AssemblyName System.Speech
                     ${'$'}s = New-Object System.Speech.Synthesis.SpeechSynthesizer
-                    try { ${'$'}s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::NotSet, [System.Speech.Synthesis.VoiceAge]::NotSet, 0, [System.Globalization.CultureInfo]::GetCultureInfo('$langHint')) } catch {}
+                    $select
                     ${'$'}s.Rate = $rateVal
                     ${'$'}s.Speak('$safeText')
                     ${'$'}s.Dispose()
@@ -164,6 +197,23 @@ class TextToSpeech(
         }
         return SUCCESS
     }
+
+    /** Reads the SAPI voice list ("name|culture" per line). Returns empty when PowerShell/System.Speech is missing. */
+    private fun queryInstalledVoices(): List<Pair<String, String>> = runCatching {
+        val script = """
+            Add-Type -AssemblyName System.Speech
+            ${'$'}s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+            ${'$'}s.GetInstalledVoices() | ForEach-Object { if (${'$'}_.Enabled) { Write-Output (${'$'}_.VoiceInfo.Name + '|' + ${'$'}_.VoiceInfo.Culture.Name) } }
+            ${'$'}s.Dispose()
+        """.trimIndent()
+        val proc = ProcessBuilder("powershell", "-NoProfile", "-NonInteractive", "-Command", script).start()
+        val lines = proc.inputStream.bufferedReader(Charsets.UTF_8).readLines()
+        proc.waitFor()
+        lines.mapNotNull { line ->
+            val bar = line.indexOf('|')
+            if (bar <= 0) null else line.substring(0, bar).trim() to line.substring(bar + 1).trim()
+        }.filter { it.first.isNotBlank() && it.second.isNotBlank() }
+    }.getOrDefault(emptyList())
 
     private fun stopCurrentProcess() {
         generation.incrementAndGet()

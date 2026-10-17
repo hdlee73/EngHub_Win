@@ -45,5 +45,8 @@ fun painterResource(id: Int): Painter {
             }
         }.getOrNull()
     }
-    return if (bitmap != null) BitmapPainter(bitmap) else ColorPainter(Color.Transparent)
+    if (bitmap != null) return BitmapPainter(bitmap)
+    // Never fail silently: an unloadable drawable used to become an invisible icon with no clue why.
+    System.err.println("EngHub: could not load drawable '${path}' (id=$id); using a transparent placeholder")
+    return ColorPainter(Color.Transparent)
 }

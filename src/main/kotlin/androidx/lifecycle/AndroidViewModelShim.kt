@@ -47,5 +47,14 @@ open class AndroidViewModel(private val application: Application) : ViewModel() 
     fun <T : Application> getApplication(): T = application as T
 }
 
+/**
+ * One scope per owner, kept in a weak map. The old version created (and leaked) a brand-new
+ * uncancellable scope on every access.
+ */
+private val lifecycleScopes =
+    java.util.Collections.synchronizedMap(java.util.WeakHashMap<LifecycleOwner, CoroutineScope>())
+
 val LifecycleOwner.lifecycleScope: CoroutineScope
-    get() = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    get() = synchronized(lifecycleScopes) {
+        lifecycleScopes[this] ?: CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate).also { lifecycleScopes[this] = it }
+    }

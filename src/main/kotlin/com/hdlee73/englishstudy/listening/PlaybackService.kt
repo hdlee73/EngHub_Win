@@ -49,12 +49,20 @@ class PlaybackService : Service() {
         @Volatile var pauseAtEndOfMediaItems: Boolean = false
 
         private val queue = mutableListOf<TrackStore.Entry>()
-        private var loadedUri: String? = null
-        private var pcmBytes: ByteArray = ByteArray(0)
-        private var sampleRate: Int = 44100
-        private var channels: Int = 2
+        @Volatile private var loadedUri: String? = null
+        @Volatile private var pcmBytes: ByteArray = ByteArray(0)
+        @Volatile private var sampleRate: Int = 44100
+        @Volatile private var channels: Int = 2
         private var playThread: Thread? = null
         @Volatile private var threadGen = 0
+        /** A decode/playback problem to show once; the Listening screen polls [consumeError]. */
+        private var pendingError: String? = null
+
+        // Decoding runs here, never on the UI thread, so a long track no longer freezes the screen.
+        private val decoder: java.util.concurrent.ExecutorService =
+            java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "EngHub-AudioDecode").apply { isDaemon = true } }
+        private var decodeFuture: java.util.concurrent.Future<*>? = null
+        private var decodeGen = 0
 
         val mediaItemCount: Int
             @Synchronized get() = queue.size
@@ -65,6 +73,53 @@ class PlaybackService : Service() {
         val currentEntry: TrackStore.Entry?
             @Synchronized get() = queue.getOrNull(currentMediaItemIndex)
 
+        /** Returns the pending error (once) and clears it, or null. */
+        @Synchronized
+        fun consumeError(): String? = pendingError.also { pendingError = null }
+
+        /** Next index in the current order: random when shuffle is on, otherwise the following item. */
+        @Synchronized
+        fun nextIndex(): Int {
+            val count = queue.size
+            if (count == 0) return -1
+            if (shuffleModeEnabled && count > 1) {
+                var n: Int
+                do { n = kotlin.random.Random.nextInt(count) } while (n == currentMediaItemIndex)
+                return n
+            }
+            return (currentMediaItemIndex + 1) % count
+        }
+
+        /** Like ExoPlayer's hasNextMediaItem: true while something can still play after this one. */
+        @Synchronized
+        fun hasNextMediaItem(): Boolean {
+            if (queue.isEmpty()) return false
+            if (repeatMode == 2) return true
+            if (shuffleModeEnabled && queue.size > 1) return true
+            return currentMediaItemIndex + 1 < queue.size
+        }
+
+        /** Previous index in the current order: random when shuffle is on, otherwise the item before this one. */
+        @Synchronized
+        fun previousIndex(): Int {
+            val count = queue.size
+            if (count == 0) return -1
+            if (shuffleModeEnabled && count > 1) {
+                var n: Int
+                do { n = kotlin.random.Random.nextInt(count) } while (n == currentMediaItemIndex)
+                return n
+            }
+            return (currentMediaItemIndex - 1 + count) % count
+        }
+
+        @Synchronized
+        fun hasPreviousMediaItem(): Boolean {
+            if (queue.isEmpty()) return false
+            if (repeatMode == 2) return true
+            if (shuffleModeEnabled && queue.size > 1) return true
+            return currentMediaItemIndex > 0
+        }
+
         @Synchronized
         fun clearMediaItems() {
             stopAudioThread()
@@ -74,6 +129,9 @@ class PlaybackService : Service() {
             duration = 0L
             loadedUri = null
             pcmBytes = ByteArray(0)
+            decodeGen++
+            decodeFuture?.cancel(true)
+            decodeFuture = null
         }
 
         @Synchronized
@@ -156,17 +214,17 @@ class PlaybackService : Service() {
             lastPositionMs = currentPosition
         }
 
+        @Synchronized
         fun prepare() {
-            if (loadedUri != currentEntry?.uri) {
-                loadCurrentEntryPcm()
-            }
+            val entry = currentEntry ?: return
+            if (loadedUri != entry.uri || pcmBytes.isEmpty()) loadCurrentEntryPcm()
         }
 
         @Synchronized
         fun play() {
             if (queue.isEmpty()) return
             prepare()
-            if (pcmBytes.isEmpty()) return
+            if (currentEntry == null) return
             playWhenReady = true
             if (isPlaying) return
             isPlaying = true
@@ -203,91 +261,180 @@ class PlaybackService : Service() {
                 duration = 0L
                 return
             }
-            if (loadedUri == entry.uri && pcmBytes.isNotEmpty()) return
+            if (loadedUri == entry.uri) return
             loadedUri = entry.uri
-            runCatching {
-                val raw = contentResolver.openInputStream(Uri.parse(entry.uri))?.use { it.readBytes() }
-                    ?: File(Uri.parse(entry.uri).path ?: entry.uri).takeIf { it.exists() }?.readBytes()
-                    ?: ByteArray(0)
-                if (raw.isEmpty()) {
-                    pcmBytes = ByteArray(0)
-                    duration = 0L
-                    return
+            pcmBytes = ByteArray(0)
+            duration = 0L
+            scheduleDecode(entry)
+        }
+
+        /** Starts a background decode of [entry]; the newest request wins. Call while holding this monitor. */
+        private fun scheduleDecode(entry: TrackStore.Entry) {
+            val gen = ++decodeGen
+            decodeFuture?.cancel(true)
+            decodeFuture = decoder.submit(java.lang.Runnable {
+                val decoded = decodeEntry(entry)
+                synchronized(this) {
+                    if (gen != decodeGen) return@synchronized
+                    if (currentEntry?.uri != entry.uri) return@synchronized
+                    pcmBytes = decoded.data
+                    sampleRate = decoded.sampleRate
+                    channels = decoded.channels
+                    duration = (decoded.data.size * 1000L) / (decoded.sampleRate * decoded.channels * 2).coerceAtLeast(1)
                 }
-                val isWav = raw.size >= 12 &&
-                    raw[0] == 'R'.code.toByte() && raw[1] == 'I'.code.toByte() &&
-                    raw[2] == 'F'.code.toByte() && raw[3] == 'F'.code.toByte()
-                if (isWav) {
-                    AudioSystem.getAudioInputStream(ByteArrayInputStream(raw)).use { ais ->
-                        val base = ais.format
-                        val sr = base.sampleRate.toInt().coerceAtLeast(8000)
-                        val ch = base.channels.coerceIn(1, 2)
-                        val targetFmt = AudioFormat(AudioFormat.Encoding.PCM_SIGNED, sr.toFloat(), 16, ch, ch * 2, sr.toFloat(), false)
-                        AudioSystem.getAudioInputStream(targetFmt, ais).use { pcmIn ->
-                            pcmBytes = pcmIn.readBytes()
-                            sampleRate = sr
-                            channels = ch
-                        }
+            })
+        }
+
+        /** Reads the file and returns 16-bit PCM in its own sample rate. Runs off the UI thread; may throw. */
+        private fun decodeEntry(entry: TrackStore.Entry): Decoded {
+            val raw = contentResolver.openInputStream(Uri.parse(entry.uri))?.use { it.readBytes() }
+                ?: File(Uri.parse(entry.uri).path ?: entry.uri).takeIf { it.exists() }?.readBytes()
+                ?: throw IllegalStateException("파일을 열 수 없어요.")
+            if (raw.isEmpty()) throw IllegalStateException("빈 파일이에요.")
+            val isWav = raw.size >= 12 &&
+                raw[0] == 'R'.code.toByte() && raw[1] == 'I'.code.toByte() &&
+                raw[2] == 'F'.code.toByte() && raw[3] == 'F'.code.toByte()
+            if (isWav) {
+                AudioSystem.getAudioInputStream(ByteArrayInputStream(raw)).use { ais ->
+                    val base = ais.format
+                    val sr = base.sampleRate.toInt().coerceAtLeast(8000)
+                    val ch = base.channels.coerceIn(1, 2)
+                    val targetFmt = AudioFormat(AudioFormat.Encoding.PCM_SIGNED, sr.toFloat(), 16, ch, ch * 2, sr.toFloat(), false)
+                    AudioSystem.getAudioInputStream(targetFmt, ais).use { pcmIn ->
+                        return Decoded(readCapped(pcmIn), sr, ch)
                     }
-                } else {
-                    val bs = Bitstream(BufferedInputStream(ByteArrayInputStream(raw)))
-                    val dec = Decoder()
-                    val out = ByteArrayOutputStream(raw.size * 4)
-                    var sr = 44100
-                    var ch = 2
-                    while (true) {
-                        val h = bs.readFrame() ?: break
-                        val sb = dec.decodeFrame(h, bs) as? SampleBuffer
-                        if (sb != null) {
-                            sr = sb.sampleFrequency.coerceAtLeast(8000)
-                            ch = sb.channelCount.coerceIn(1, 2)
-                            val shorts = sb.buffer
-                            val len = sb.bufferLength
-                            val byteBuf = ByteArray(len * 2)
-                            var bi = 0
-                            for (i in 0 until len) {
-                                val v = shorts[i].toInt()
-                                byteBuf[bi++] = (v and 0xFF).toByte()
-                                byteBuf[bi++] = ((v ushr 8) and 0xFF).toByte()
-                            }
-                            out.write(byteBuf)
-                        }
-                        bs.closeFrame()
-                    }
-                    bs.close()
-                    pcmBytes = out.toByteArray()
-                    sampleRate = sr
-                    channels = ch
                 }
-                val bytesPerSec = (sampleRate * channels * 2).coerceAtLeast(1)
-                duration = (pcmBytes.size * 1000L) / bytesPerSec
-            }.onFailure {
-                pcmBytes = ByteArray(0)
-                duration = 0L
+            }
+            val bs = Bitstream(BufferedInputStream(ByteArrayInputStream(raw)))
+            try {
+                val dec = Decoder()
+                val out = ByteArrayOutputStream()
+                var sr = 44100
+                var ch = 2
+                while (true) {
+                    if (Thread.currentThread().isInterrupted) throw kotlinx.coroutines.CancellationException("취소됨")
+                    val h = bs.readFrame() ?: break
+                    val sb = dec.decodeFrame(h, bs) as? SampleBuffer
+                    if (sb != null) {
+                        sr = sb.sampleFrequency.coerceAtLeast(8000)
+                        ch = sb.channelCount.coerceIn(1, 2)
+                        val shorts = sb.buffer
+                        val len = sb.bufferLength
+                        if (out.size().toLong() + len * 2L > MAX_PCM_BYTES) {
+                            throw IllegalStateException("오디오가 너무 커서 재생할 수 없어요.")
+                        }
+                        val byteBuf = ByteArray(len * 2)
+                        var bi = 0
+                        for (i in 0 until len) {
+                            val v = shorts[i].toInt()
+                            byteBuf[bi++] = (v and 0xFF).toByte()
+                            byteBuf[bi++] = ((v ushr 8) and 0xFF).toByte()
+                        }
+                        out.write(byteBuf)
+                    }
+                    bs.closeFrame()
+                }
+                return Decoded(out.toByteArray(), sr, ch)
+            } finally {
+                bs.close()
             }
         }
 
+        /** Reads all of [ins] but stops with a clear message rather than exhausting the heap on a huge file. */
+        private fun readCapped(ins: java.io.InputStream): ByteArray {
+            val out = ByteArrayOutputStream()
+            val buf = ByteArray(1 shl 16)
+            while (true) {
+                if (Thread.currentThread().isInterrupted) throw kotlinx.coroutines.CancellationException("취소됨")
+                val n = ins.read(buf)
+                if (n < 0) break
+                if (out.size().toLong() + n > MAX_PCM_BYTES) throw IllegalStateException("오디오가 너무 커서 재생할 수 없어요.")
+                out.write(buf, 0, n)
+            }
+            return out.toByteArray()
+        }
+
+        /** Waits for the background decode, retrying once here if it failed. Must be called off the monitor. */
+        private fun ensureDecoded(myGen: Int): Boolean {
+            val entry = synchronized(this) { currentEntry } ?: return false
+            if (synchronized(this) { pcmBytes.isNotEmpty() && currentEntry?.uri == entry.uri }) return true
+            synchronized(this) { loadCurrentEntryPcm() }
+            val fut = synchronized(this) { decodeFuture }
+            runCatching { fut?.get() }
+            if (myGen != threadGen) return false
+            if (synchronized(this) { pcmBytes.isNotEmpty() && currentEntry?.uri == entry.uri }) return true
+            // One retry on this thread: a transient read/decoder failure should not silently end playback.
+            return try {
+                val decoded = decodeEntry(entry)
+                synchronized(this) {
+                    if (currentEntry?.uri == entry.uri) {
+                        pcmBytes = decoded.data
+                        sampleRate = decoded.sampleRate
+                        channels = decoded.channels
+                        duration = (decoded.data.size * 1000L) / (decoded.sampleRate * decoded.channels * 2).coerceAtLeast(1)
+                    }
+                }
+                myGen == threadGen && synchronized(this) { pcmBytes.isNotEmpty() }
+            } catch (e: Throwable) {
+                synchronized(this) {
+                    pendingError = "오디오를 열지 못했어요. (${e.message ?: e.javaClass.simpleName})"
+                    isPlaying = false
+                    playWhenReady = false
+                }
+                false
+            }
+        }
+
+        /** Clears the "playing" flag as the audio thread ends so the next track (repeat one) can start. */
+        private fun endedPlayback(myGen: Int) {
+            if (myGen != threadGen) return
+            isPlaying = false
+            playWhenReady = false
+        }
+
         private fun runAudioLoop(myGen: Int) {
-            val frameBytes = channels * 2
-            val bytesPerMs = (sampleRate * frameBytes) / 1000.0
-            val fmt = AudioFormat(sampleRate.toFloat(), 16, channels, true, false)
+            if (!ensureDecoded(myGen)) return
+            val data: ByteArray
+            val sr: Int
+            val ch: Int
+            synchronized(this) {
+                data = pcmBytes
+                sr = sampleRate
+                ch = channels
+            }
+            if (myGen != threadGen || data.isEmpty()) return
+            val frameBytes = ch * 2
+            val bytesPerMs = (sr * frameBytes) / 1000.0
+            val fmt = AudioFormat(sr.toFloat(), 16, ch, true, false)
             val info = DataLine.Info(SourceDataLine::class.java, fmt)
             val line = runCatching {
                 (AudioSystem.getLine(info) as SourceDataLine).also {
-                    it.open(fmt, sampleRate * frameBytes / 4)
+                    it.open(fmt, sr * frameBytes / 4)
                     it.start()
                 }
             }.getOrNull()
             try {
                 val outBuf = ByteArray(4096)
+                // 재생 커서는 바이트 단위로만 앞으로 나간다. 예전에는 청크(약 23ms)마다 재생 위치를 ms 로 반올림해
+                // 바이트 오프셋을 다시 계산했는데, 그 값이 직전에 쓴 지점보다 몇 프레임 앞으로 되돌아가는 일이
+                // 반복되어 같은 소리가 겹쳐 나면서 지속적인 잡음이 났다(사용자 신고). 커서를 그대로 밀면 이어진다.
+                var cursor = ((currentPosition * bytesPerMs).toLong() / frameBytes) * frameBytes
+                var expectedMs = currentPosition
                 while (myGen == threadGen && isPlaying) {
-                    val data = pcmBytes
-                    if (data.isEmpty()) break
                     val posMs = currentPosition
-                    var byteOffset = ((posMs * bytesPerMs).toInt() / frameBytes) * frameBytes
-                    if (byteOffset >= data.size) {
+                    // 탐색 등으로 밖에서 위치가 바뀐 경우에만 커서를 그 지점으로 다시 맞춘다.
+                    if (posMs != expectedMs) {
+                        cursor = ((posMs * bytesPerMs).toLong() / frameBytes) * frameBytes
+                    }
+                    val byteOffset = cursor.coerceIn(0L, data.size.toLong()).toInt()
+                    val remaining = data.size - byteOffset
+                    // The same yardstick for "done" as for the seek bar: the position reaches the duration, or no whole frame is left.
+                    if (posMs >= duration || remaining < frameBytes) {
                         handler.post {
-                            if (myGen == threadGen) onTrackEnded()
+                            if (myGen == threadGen) {
+                                endedPlayback(myGen)
+                                onTrackEnded()
+                            }
                         }
                         break
                     }
@@ -295,12 +442,8 @@ class PlaybackService : Service() {
                     val chunkFrames = 1024
                     val srcFrames = (chunkFrames * spd).roundToInt().coerceAtLeast(1)
                     val srcBytesNeeded = srcFrames * frameBytes
-                    val availBytes = (data.size - byteOffset).coerceAtMost(srcBytesNeeded)
+                    val availBytes = remaining.coerceAtMost(srcBytesNeeded)
                     val availFrames = availBytes / frameBytes
-                    if (availFrames <= 0) {
-                        currentPosition = duration
-                        continue
-                    }
                     if (spd == 1.0f || line == null) {
                         if (line != null) {
                             line.write(data, byteOffset, availFrames * frameBytes)
@@ -321,8 +464,10 @@ class PlaybackService : Service() {
                         }
                         line.write(targetBuf, 0, neededOutBytes)
                     }
-                    val advancedMs = ((availFrames * 1000L) / sampleRate.coerceAtLeast(1)).coerceAtLeast(1L)
+                    cursor += availFrames.toLong() * frameBytes
+                    val advancedMs = ((availFrames * 1000L) / sr.coerceAtLeast(1)).coerceAtLeast(1L)
                     currentPosition = (currentPosition + advancedMs).coerceAtMost(duration)
+                    expectedMs = currentPosition
                     tick()
                 }
             } catch (_: Throwable) {
@@ -452,29 +597,31 @@ class PlaybackService : Service() {
                 if (!gapPending) player.play()
             }
             2 -> {
-                val count = player.mediaItemCount
-                if (count > 0) {
-                    val next = if (player.shuffleModeEnabled && count > 1) {
-                        (0 until count).filter { it != player.currentMediaItemIndex }.random()
-                    } else {
-                        (player.currentMediaItemIndex + 1) % count
-                    }
-                    playIndex(next)
+                if (player.mediaItemCount > 0) {
+                    markCurrentDone()
+                    playIndex(player.nextIndex())
                 }
             }
             else -> {
-                val next = player.currentMediaItemIndex + 1
-                if (next < player.mediaItemCount) {
+                val count = player.mediaItemCount
+                val next = if (player.shuffleModeEnabled && count > 1) player.nextIndex() else player.currentMediaItemIndex + 1
+                if (next < count) {
+                    markCurrentDone()
                     playIndex(next)
                 } else {
                     player.pause()
-                    val uri = currentUri ?: return
-                    current.done = true
-                    current.positionMs = 0L
-                    store.saveState(uri, current)
+                    markCurrentDone()
                 }
             }
         }
+    }
+
+    /** The track that just finished is remembered as listened, so the playlist stops showing it as unfinished. */
+    private fun markCurrentDone() {
+        val uri = currentUri ?: return
+        current.done = true
+        current.positionMs = 0L
+        store.saveState(uri, current)
     }
 
     private fun renameSixMinuteEntries() {
@@ -804,6 +951,9 @@ class PlaybackService : Service() {
     val isActive: Boolean
         get() = player.isPlaying
 
+    /** A decode/playback problem the screen should show once, or null. */
+    fun consumeError(): String? = player.consumeError()
+
     fun togglePlay() {
         if (player.mediaItemCount == 0) return
         cancelGap()
@@ -1095,6 +1245,8 @@ class PlaybackService : Service() {
         private const val MIN_RANGE_MS = 200L
         private const val PREVIEW_BEFORE_B_MS = 1_500L
         private const val SAVE_INTERVAL_MS = 5_000L
+        /** Decoded PCM cap (16-bit). A track longer than this is refused instead of exhausting the heap. */
+        private const val MAX_PCM_BYTES = 512L * 1024 * 1024
 
         /** Process-wide singleton so playback never stops when navigating between tabs (Modification 1). */
         val instance: PlaybackService by lazy {
@@ -1102,3 +1254,6 @@ class PlaybackService : Service() {
         }
     }
 }
+
+/** 16-bit PCM decoded from one track, in the track's own sample rate and channel count. */
+private class Decoded(val data: ByteArray, val sampleRate: Int, val channels: Int)

@@ -32,10 +32,11 @@ object UpdateChecker {
     private const val KEY_VERSION = "latest_version"
     private const val KEY_URL = "latest_url"
     private const val KEY_APK = "latest_apk"
+    private const val KEY_DIGEST = "latest_digest"
     private const val KEY_NOTIFIED = "notified_version"
     private const val CHANNEL = "app_update"
 
-    data class Release(val version: String, val url: String, val apkUrl: String? = null)
+    data class Release(val version: String, val url: String, val apkUrl: String? = null, val apkDigest: String? = null)
 
     private val client by lazy { OkHttpClient.Builder().callTimeout(20, TimeUnit.SECONDS).build() }
 
@@ -64,7 +65,7 @@ object UpdateChecker {
         val p = prefs(context)
         val version = p.getString(KEY_VERSION, null) ?: return null
         if (!isNewer(version, installedVersion(context))) return null
-        return Release(version, p.getString(KEY_URL, null) ?: RELEASES_URL, p.getString(KEY_APK, null))
+        return Release(version, p.getString(KEY_URL, null) ?: RELEASES_URL, p.getString(KEY_APK, null), p.getString(KEY_DIGEST, null))
     }
 
     /** Asks GitHub for the latest release and remembers it. Returns the newer release, or null if up to date or offline. */
@@ -80,16 +81,18 @@ object UpdateChecker {
         // The Windows installer (.msi) for this machine's processor (x64 or arm64) is what the in-app update downloads and runs.
         val arch = if (System.getProperty("os.arch").orEmpty().lowercase().let { it.contains("aarch64") || it.contains("arm64") }) "arm64" else "x64"
         var apk: String? = null
+        var digest: String? = null
         if (assets != null) for (i in 0 until assets.length()) {
             val a = assets.optJSONObject(i) ?: continue
             val name = a.optString("name")
             if (name.endsWith(".msi", ignoreCase = true) && name.contains(arch, ignoreCase = true)) {
                 apk = a.optString("browser_download_url").ifBlank { null }
+                digest = a.optString("digest").takeIf { it.startsWith("sha256:") }
                 break
             }
         }
         prefs(context).edit().putString(KEY_VERSION, tag).putString(KEY_URL, json.optString("html_url").ifBlank { RELEASES_URL })
-            .putString(KEY_APK, apk).apply()
+            .putString(KEY_APK, apk).putString(KEY_DIGEST, digest).apply()
         available(context)
     }
 

@@ -62,6 +62,37 @@ import java.io.File
 import java.util.LinkedHashMap
 import kotlin.math.roundToInt
 
+/** Byte-bounded LRU for page bitmaps: the Android app caps this at 56 MB; one bitmap is width*height*4 bytes. */
+private class BitmapCache(private val maxBytes: Long) : LinkedHashMap<String, ImageBitmap>(16, 0.75f, true) {
+    private var bytes = 0L
+
+    private fun sizeOf(bitmap: ImageBitmap): Long = bitmap.width.toLong() * bitmap.height.toLong() * 4L
+
+    override fun put(key: String, value: ImageBitmap): ImageBitmap? {
+        val previous = super.put(key, value)
+        bytes += sizeOf(value)
+        if (previous != null) bytes -= sizeOf(previous)
+        return previous
+    }
+
+    override fun remove(key: String): ImageBitmap? {
+        val previous = super.remove(key)
+        if (previous != null) bytes -= sizeOf(previous)
+        return previous
+    }
+
+    override fun clear() {
+        super.clear()
+        bytes = 0L
+    }
+
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?): Boolean {
+        if (bytes <= maxBytes || size <= 1) return false
+        eldest?.let { bytes -= sizeOf(it.value) }
+        return true
+    }
+}
+
 /** The pages of a PDF file as they are (PDFBox PDFRenderer), one under the other, with pinch zoom and the last page remembered. */
 private class PdfHolder(file: File) {
     private val lock = Mutex()
@@ -69,9 +100,7 @@ private class PdfHolder(file: File) {
     private val renderer = PDFRenderer(doc)
     val pageCount: Int = doc.numberOfPages
     private var closed = false
-    private val cache = object : LinkedHashMap<String, ImageBitmap>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?): Boolean = size > 12
-    }
+    private val cache = BitmapCache(56L * 1024 * 1024)
 
     /** Height / width of every page. */
     suspend fun aspects(): List<Float> = withContext(Dispatchers.IO) {

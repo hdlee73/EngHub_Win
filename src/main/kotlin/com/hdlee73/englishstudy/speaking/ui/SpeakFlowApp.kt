@@ -1,5 +1,6 @@
 package com.hdlee73.englishstudy.speaking.ui
 
+import android.media.AudioDeviceInfo
 import androidx.compose.foundation.Canvas as DrawCanvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
@@ -562,11 +563,19 @@ private fun RoundButton(iconRes: Int, description: String, buttonSize: Int, onCl
     }
 }
 
+/** Opens the Windows sound settings page so the user can pick the default input device. */
+private fun openWindowsSoundSettings() {
+    runCatching { java.awt.Desktop.getDesktop().browse(java.net.URI("ms-settings:sound")) }
+        .onFailure { runCatching { Runtime.getRuntime().exec(arrayOf("cmd", "/c", "start", "ms-settings:sound")) } }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(current: LearningSettings, bluetoothDevices: List<BluetoothChoice>, onOpenUpdate: (String) -> Unit, onClose: () -> Unit, onSave: (LearningSettings) -> Unit, onStatistics: () -> Unit) {
     var draft by remember { mutableStateOf(current) }
     var aboutOpen by remember { mutableStateOf(false) }
+    // Real Windows capture devices (JavaSound). Bluetooth headset mics only appear here when connected in hands-free mode.
+    val inputs = remember { runCatching { android.media.AudioDevices.inputDevices() }.getOrDefault(emptyList()) }
     if (aboutOpen) com.hdlee73.englishstudy.ui.AboutDialog(onOpenUrl = onOpenUpdate, onDismiss = { aboutOpen = false })
     SheetDialog(onDismiss = onClose) {
         Column(Modifier.fillMaxSize().padding(horizontal = 24.dp).padding(top = 20.dp)) {
@@ -602,29 +611,22 @@ private fun SettingsSheet(current: LearningSettings, bluetoothDevices: List<Blue
                 }
                 Text("설치된 음성 중 가장 자연스러운 음성을 자동으로 사용합니다.", color = Color.Gray, fontSize = 12.sp)
                 Spacer(Modifier.height(18.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("야외 잡음 보정 입력", Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                    Switch(checked = draft.outdoorAudio, onCheckedChange = { draft = draft.copy(outdoorAudio = it) })
-                }
-                Text("Android 13 이상에서 지원되는 음성 인식 엔진에 보정된 마이크 입력을 전달합니다. 지원되지 않으면 일반 입력으로 돌아갑니다. 바람 소리 제거 효과는 기기마다 다릅니다.", fontSize = 12.sp, color = Color.Gray)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("휴대전화 마이크 사용", Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                    Switch(checked = draft.phoneMic, onCheckedChange = { draft = draft.copy(phoneMic = it) })
-                }
-                Text("끄면 블루투스 이어셋을 우선 사용합니다. 워치는 마이크 대상으로 제외합니다.", fontSize = 12.sp, color = Color.Gray)
-                Spacer(Modifier.height(10.dp))
-                Text("블루투스 마이크 기기", fontWeight = FontWeight.Bold)
+                Text("입력 장치 (마이크)", fontWeight = FontWeight.Bold)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(selected = draft.bluetoothInputAddress.isBlank(), onClick = { draft = draft.copy(bluetoothInputAddress = "") })
-                    Text("자동 · 지금 소리가 나오는 이어셋 우선", fontSize = 13.sp)
+                    Text("자동 (연결된 마이크 선택)", fontSize = 13.sp)
                 }
-                bluetoothDevices.forEach { device ->
+                inputs.forEach { device ->
+                    val bluetooth = device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || device.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                        bluetoothDevices.any { it.address == device.address }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         RadioButton(selected = draft.bluetoothInputAddress == device.address, onClick = { draft = draft.copy(bluetoothInputAddress = device.address) })
-                        Text(device.name + if (device.watch) " (워치)" else "", fontSize = 13.sp)
+                        Text(device.productName.toString() + if (bluetooth) " · Bluetooth" else "", fontSize = 13.sp)
                     }
                 }
-                if (bluetoothDevices.isEmpty()) Text("연결된 블루투스 오디오 기기를 찾지 못했습니다. 블루투스 권한을 허용하지 않았다면 처음 학습을 시작할 때 허용해 주세요.", fontSize = 12.sp, color = Color.Gray)
+                if (inputs.isEmpty()) Text("입력 장치를 찾지 못했습니다.", fontSize = 12.sp, color = Color.Gray)
+                Text("인식은 여기에서 고른 마이크로 직접 듣습니다. 블루투스 이어셋 마이크는 핸즈프리(통화) 모드로 연결된 경우에만 나타나고, 고른 뒤 소리가 들어오기까지 2초쯤 걸릴 수 있습니다.", color = Color.Gray, fontSize = 12.sp, maxLines = 4)
+                OutlinedButton(onClick = { openWindowsSoundSettings() }, modifier = Modifier.fillMaxWidth()) { Text("Windows 소리 설정 열기") }
                 Spacer(Modifier.height(18.dp))
                 Text("동일 문장 반복횟수", fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -643,12 +645,6 @@ private fun SettingsSheet(current: LearningSettings, bluetoothDevices: List<Blue
                     Text("수동: 정답은 자동, 오답은 다시/다음 선택", fontSize = 13.sp)
                 }
                 Text("제한시간 20초 · 정답일 때만 알림음", color = Color.Gray, fontSize = 12.sp)
-                Spacer(Modifier.height(18.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("scrcpy PC 미러링 오디오", Modifier.weight(1f), fontWeight = FontWeight.Bold)
-                    Switch(checked = draft.mirrorAudio, onCheckedChange = { draft = draft.copy(mirrorAudio = it) })
-                }
-                Text("미러링 중 미디어 음량을 유지합니다. PC에서 scrcpy --audio-dup 으로 실행하면 휴대전화·PC에서 함께 들을 수 있습니다. 인식 서비스의 시작음이 들릴 수 있습니다.", color = Color.Gray, fontSize = 12.sp)
                 Spacer(Modifier.height(18.dp))
                 OutlinedButton(onClick = onStatistics, modifier = Modifier.fillMaxWidth()) { Text("학습량 · 학습시간 통계") }
                 OutlinedButton(onClick = { aboutOpen = true }, modifier = Modifier.fillMaxWidth()) { Text("앱 정보 · 업데이트") }

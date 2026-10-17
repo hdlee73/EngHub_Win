@@ -87,6 +87,8 @@ class JobService : Service() {
                 JobHub.state.value = JobState.Failed(e.message ?: "음성 합성에 실패했습니다.")
             } catch (e: com.hdlee73.englishstudy.docvoice.core.YouTubeException) {
                 JobHub.state.value = JobState.Failed(e.message ?: "유튜브에서 소리를 가져오지 못했습니다.")
+            } catch (e: com.hdlee73.englishstudy.docvoice.core.Mp3Encoder.EncodeException) {
+                JobHub.state.value = JobState.Failed(e.message ?: "오디오를 MP3 로 바꾸지 못했습니다.")
             } catch (e: ModelException) {
                 JobHub.state.value = JobState.Failed(e.message ?: "모델을 준비하지 못했습니다.")
             } catch (e: AudioDecoder.DecodeException) {
@@ -197,7 +199,9 @@ class JobService : Service() {
         }
         try {
             progress(title, "MP3 로 바꾸는 중", 0f)
-            val name = req.outName.ifBlank { got.title.replace(Regex("""[\\/:*?"<>|\p{Cntrl}]"""), " ").replace(Regex("\\s+"), " ").trim().take(80).ifBlank { "YouTube" } } + ".mp3"
+            val base = req.outName.ifBlank { got.title.replace(Regex("""[\\/:*?"<>|\p{Cntrl}]"""), " ").replace(Regex("\\s+"), " ").trim().take(80).ifBlank { "YouTube" } }
+            val ext = com.hdlee73.englishstudy.docvoice.core.Mp3Encoder.outputExtension(got.file)
+            val name = "$base.$ext"
             val uri = withContext(Dispatchers.IO) {
                 Storage.saveToDownloads(this@JobService, name) { out ->
                     val buffered = out.buffered(1 shl 16)
@@ -205,7 +209,12 @@ class JobService : Service() {
                     buffered.flush()
                 }
             }
-            JobHub.state.value = JobState.Done("MP3 변환 완료", listOf(OutFile(name, uri, "audio/mpeg")), null)
+            val note = if (ext == com.hdlee73.englishstudy.docvoice.core.Mp3Encoder.WAV) "ffmpeg 이 없어 MP3 대신 재생 가능한 WAV 로 저장했어요." else null
+            JobHub.state.value = JobState.Done(
+                if (ext == com.hdlee73.englishstudy.docvoice.core.Mp3Encoder.WAV) "오디오 변환 완료 (WAV)" else "MP3 변환 완료",
+                listOf(OutFile(name, uri, com.hdlee73.englishstudy.docvoice.core.Mp3Encoder.mimeFor(ext))),
+                note,
+            )
         } finally {
             got.file.delete()
         }
@@ -228,7 +237,13 @@ class JobService : Service() {
         } finally {
             pcm.close()
         }
-        if (result.segments.isEmpty()) throw ExtractException("음성에서 인식된 말이 없습니다.")
+        if (result.segments.isEmpty()) throw ExtractException(
+            if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
+                "이 PC에는 Windows 음성 인식 엔진이 없어 받아쓰기를 할 수 없습니다. 도움말 → 음성 인식 엔진 설치 안내를 확인해 주세요."
+            } else {
+                "음성에서 인식된 말이 없습니다."
+            }
+        )
         val bytes = finishDocument(title, result, req.format, req.outName.ifBlank { Storage.baseName(req.audio.name) }, req.gap, req.includeTime, req.showSpeaker)
         // An SRT made from an audio file becomes that file's subtitle in the Listening player.
         if (req.format == "srt") runCatching {
@@ -261,12 +276,9 @@ class JobService : Service() {
     }
 
     private suspend fun runModelDownload(req: JobRequest.ModelDownload, title: String) {
-        val job = currentCoroutineContext()[Job]!!
-        progress(title, "${req.lang.label} 모델 내려받는 중", 0f)
-        withContext(Dispatchers.IO) {
-            ModelStore(this@JobService).ensureLive(req.lang, { job.isActive }) { m, f -> progress(title, "${req.lang.label} · $m", f) }
-        }
-        JobHub.state.value = JobState.Done("${req.lang.label} 모델 준비 완료", emptyList(), null)
+        // 이 셰임에는 스트리밍(sherpa-onnx) 엔진이 없어 내려받을 모델이 없다. 받아쓰기는 Windows 음성 인식기가 맡는다.
+        progress(title, "받아쓰기는 Windows 음성 인식기로 바로 돼요", 1f)
+        JobHub.state.value = JobState.Done("${req.lang.label} 실시간 모델은 이 버전에서 쓰이지 않아요.", emptyList(), null)
     }
 
     private suspend fun runRecExport(req: JobRequest.RecExport, title: String) {
@@ -311,12 +323,17 @@ class JobService : Service() {
         progress(title, "문서로 정리하는 중", null)
         val (sentences, paragraphs) = Stt.toDocument(result, gap)
         val speakers = showSpeakerReq && result.turns.isNotEmpty()
+        val notes = mutableListOf<String>()
         val bytes = withContext(Dispatchers.IO) {
             when (format) {
                 "xlsx" -> Exporter.xlsx(sentences, includeTime, speakers)
                 "docx" -> Exporter.docx(paragraphs, docTitle, includeTime, speakers)
                 "srt" -> Exporter.srt(sentences, speakers)
-                "pdf" -> PdfExporter.export(this@JobService, paragraphs, docTitle, includeTime, speakers)
+                "pdf" -> {
+                    val r = PdfExporter.exportDetailed(this@JobService, paragraphs, docTitle, includeTime, speakers)
+                    if (r.replacedChars > 0) notes += "PDF 글꼴에 없는 글자 ${r.replacedChars}개는 '?' 로 바꿨어요."
+                    r.bytes
+                }
                 else -> Exporter.txt(paragraphs, includeTime, speakers)
             }
         }
@@ -328,10 +345,11 @@ class JobService : Service() {
             if (format != "xlsx" && format != "srt") append(" · ${paragraphs.size}문단")
             if (n > 0) append(" · 화자 ${n}명")
         }
+        val note = (listOfNotNull(result.diarizationNote) + notes).joinToString("\n").ifEmpty { null }
         JobHub.state.value = JobState.Done(
             "문서 변환 완료  ($info)",
             listOf(OutFile(name, uri, Storage.mimeFor(name))),
-            result.diarizationNote,
+            note,
         )
         return bytes
     }

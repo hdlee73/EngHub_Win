@@ -128,7 +128,7 @@ fun ListeningScreen(
     var pendingAddGroup by remember { mutableIntStateOf(-1) }
     val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
-        val picked = uris.map { it to displayName(context, it) }
+        val picked = uris.map { displayName(context, it).let { name -> keepPlayable(context, it, name) to name } }
         val entries = picked.map { (uri, name) -> TrackStore.Entry(uri.toString(), name) }
             .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
         val group = pendingAddGroup.takeIf { it in svc.groups.indices } ?: svc.activeGroup
@@ -213,8 +213,10 @@ fun ListeningScreen(
         when (intent.action) {
             Intent.ACTION_VIEW -> {
                 val uri = intent.data
-                if (uri != null) svc.openAndPlay(TrackStore.Entry(uri.toString(), displayName(context, uri)))
-                else toast("오디오 파일을 열 수 없습니다.")
+                if (uri != null) {
+                    val name = displayName(context, uri)
+                    svc.openAndPlay(TrackStore.Entry(keepPlayable(context, uri, name).toString(), name))
+                } else toast("오디오 파일을 열 수 없습니다.")
             }
             ListeningLink.ACTION_PICK_DRIVE -> env.addFilesTo(svc.activeGroup)
             ListeningLink.ACTION_RESUME_LAST -> if (svc.player.mediaItemCount == 0) env.addFilesTo(svc.activeGroup) else svc.resume()
@@ -222,7 +224,11 @@ fun ListeningScreen(
         onIntentConsumed()
     }
     // New BBC episodes fetched in the background are put into the 6min folder.
-    LaunchedEffect(live) { if (SixMinuteEnglish.hasPending(context)) svc.importPending() }
+    LaunchedEffect(live) {
+        if (SixMinuteEnglish.hasPending(context)) svc.importPending()
+        // A decode/playback problem (e.g. a file that cannot be opened) surfaces here exactly once.
+        svc.consumeError()?.let { toast(it) }
+    }
 
     // Esc closes the sheet that is open (sheets register their own, newer handlers for inner pages).
     BackHandler(enabled = sheet != LsSheet.NONE) { sheet = LsSheet.NONE }
@@ -325,10 +331,9 @@ fun ListeningScreen(
                                 }
                                 Spacer(Modifier.weight(1f))
                                 TransportIcon(R.drawable.ls_ic_fast_rewind, "이전 곡", 64.dp, 64.dp) {
-                                    val index = player.currentMediaItemIndex
                                     when {
                                         count == 0 -> toast("먼저 오디오 파일을 추가해 주세요.")
-                                        index > 0 -> player.seekToDefaultPosition(index - 1)
+                                        player.hasPreviousMediaItem() -> player.seekToDefaultPosition(player.previousIndex())
                                         else -> { toast("재생목록의 첫 곡입니다."); player.seekTo(0) }
                                     }
                                 }
@@ -338,12 +343,9 @@ fun ListeningScreen(
                                 }
                                 Spacer(Modifier.weight(1f))
                                 TransportIcon(R.drawable.ls_ic_fast_forward, "다음 곡", 64.dp, 64.dp) {
-                                    val index = player.currentMediaItemIndex
                                     when {
                                         count == 0 -> toast("먼저 오디오 파일을 추가해 주세요.")
-                                        svc.shuffle && count > 1 ->
-                                            player.seekToDefaultPosition((0 until count).filter { it != index }.random())
-                                        index + 1 < count -> player.seekToDefaultPosition(index + 1)
+                                        player.hasNextMediaItem() -> player.seekToDefaultPosition(player.nextIndex())
                                         else -> toast("재생목록의 마지막 곡입니다.")
                                     }
                                 }
@@ -484,8 +486,8 @@ fun ListeningScreen(
             "저장한 구간 · ${ranges.size}개",
             ranges.map { it.name + "\n" + formatTimeTenths(it.startMs) + " – " + formatTimeTenths(it.endMs) },
             onDismiss = { rangesOpen = false },
-            onPick = { svc.applyRange(it) },
-            onLongPick = { rangeMenu = it }
+            onPick = { rangesOpen = false; svc.applyRange(it) },
+            onLongPick = { rangesOpen = false; rangeMenu = it }
         )
     }
     rangeMenu?.let { index ->
@@ -641,4 +643,24 @@ internal fun displayName(context: Context, uri: Uri): String {
     }.getOrNull()?.takeIf { it.isNotBlank() }
         ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
         ?: "선택한 오디오"
+}
+
+/**
+ * Keeps a picked file playable for good. When the uri already points at a readable file it is used as is;
+ * otherwise a private copy is taken under files/picked (like the Android app does) so the track does not
+ * vanish when the source folder is moved or its temporary files are cleaned up.
+ */
+internal fun keepPlayable(context: Context, uri: Uri, name: String = displayName(context, uri)): Uri {
+    val path = uri.path
+    if (uri.scheme == "file" || (path != null && java.io.File(path).isFile)) return uri
+    return runCatching {
+        val dir = java.io.File(context.filesDir, "picked").apply { mkdirs() }
+        val safe = name.replace(Regex("[^\\w.\\- ]+"), "_").take(120).ifBlank { "audio" }
+        val existing = dir.listFiles()?.firstOrNull { it.name.endsWith("_$safe") }
+        if (existing != null) return@runCatching Uri.fromFile(existing)
+        val target = java.io.File(dir, "${System.currentTimeMillis()}_$safe")
+        context.contentResolver.openInputStream(uri)?.use { input -> target.outputStream().use { input.copyTo(it) } }
+            ?: throw java.io.IOException("파일을 열 수 없어요.")
+        Uri.fromFile(target)
+    }.getOrElse { uri }
 }

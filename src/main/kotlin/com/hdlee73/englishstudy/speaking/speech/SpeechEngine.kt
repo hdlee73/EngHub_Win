@@ -137,7 +137,7 @@ class SpeechEngine(
                 }, 300L)
             }
             @Deprecated("Deprecated in Java") override fun onError(utteranceId: String?) {
-                mainHandler.post { if (utteranceId != null && utteranceId == currentPromptId) onUnavailable("예문 음성을 재생하지 못했습니다. 휴대전화의 미디어 음량과 TTS 설정을 확인해 주세요.") }
+                mainHandler.post { if (utteranceId != null && utteranceId == currentPromptId) onUnavailable("예문 음성을 재생하지 못했습니다. Windows의 미디어 음량과 음성(TTS) 설정을 확인해 주세요.") }
             }
         })
     }
@@ -309,7 +309,7 @@ class SpeechEngine(
     }
 
     fun listen(expectedText: String) {
-        if (!SpeechRecognizer.isRecognitionAvailable(appContext)) { onUnavailable("이 기기에서 음성 인식을 사용할 수 없습니다."); return }
+        if (!SpeechRecognizer.isRecognitionAvailable(appContext)) { onUnavailable("이 PC에는 Windows 음성 인식 엔진이 없어 발음 인식을 할 수 없습니다. 도움말 → 음성 인식 엔진 설치 안내를 확인해 주세요."); return }
         cancelPendingListen()
         cancelPendingChime()
         acceptingRecognitionResults = false
@@ -374,7 +374,7 @@ class SpeechEngine(
                     if (bluetoothRouteActive) check(device != null)
                     source.attach(intent, device)
                     outdoorSource = source
-                    onInputDeviceChanged("${device?.productName ?: "휴대전화"} 마이크 · " + when {
+                    onInputDeviceChanged("${device?.productName ?: "Windows 기본"} 마이크 · " + when {
                         !outdoorAudio -> "녹음 입력"
                         source.noiseSuppressed -> "야외 잡음 보정"
                         else -> "야외 입력"
@@ -388,6 +388,14 @@ class SpeechEngine(
             if (recordingWanted && outdoorSource == null && !recordingNoticeShown) {
                 recordingNoticeShown = true
                 onNotice("이 기기의 음성 인식에서는 녹음을 사용할 수 없어 녹음 없이 진행합니다.")
+            }
+            // Windows: System.Speech 는 Windows 기본 입력 장치만 듣기 때문에, 설정에서 고른 마이크(블루투스
+            // 이어셋 포함)를 그대로 인식에 쓰도록 장치 이름을 함께 넘긴다. 넘기지 않으면 셰임이 앱 시작 때
+            // 확인해 둔 "소리가 실제로 들어오는 마이크"를 쓴다.
+            runCatching {
+                val chosen = bluetoothInputAddress.takeIf { it.isNotBlank() }
+                    ?: if (bluetoothRouteActive) audioManager?.communicationDevice?.address.orEmpty() else ""
+                intent.putExtra(RecognizerIntent.EXTRA_WINDOWS_INPUT_DEVICE, chosen)
             }
             runCatching { speechRecognizer.startListening(intent) }.onSuccess {
                 pendingReadyTimeout = Runnable {
@@ -408,6 +416,34 @@ class SpeechEngine(
         }.also { mainHandler.postDelayed(it, routeDelay) }
     }
 
+    /** "자동"일 때 실제로 쓰는 마이크 이름(설정 화면/헤더 표시용). */
+    private fun autoInputLabel(): String {
+        val name = android.media.AudioDevices.autoInputDevice()?.productName?.toString()?.takeIf { it.isNotBlank() }
+            ?: return "Windows 기본 마이크"
+        return if (name.length <= 24) name else name.take(23) + "…"
+    }
+
+    /**
+     * 듣기를 시작하기 전에도 "이번에는 어떤 마이크로 들을지"를 보여 주기 위한 이름. 실제 [selectInputDevice] 가
+     * 고르는 순서(설정에서 고른 블루투스 > 연결된 블루투스 > 자동으로 고른 마이크)와 같은 규칙으로 계산한다.
+     * 예전에는 헤더가 늘 "Windows 기본 마이크" 로 시작해서, 블루투스로 듣는 중에도 기본 마이크로 듣는 것처럼 보였다.
+     */
+    fun plannedInputLabel(): String = runCatching {
+        val inputs = audioManager?.getDevices(AudioManager.GET_DEVICES_INPUTS)?.toList().orEmpty()
+        if (bluetoothInputAddress.isNotBlank()) {
+            inputs.firstOrNull { it.address == bluetoothInputAddress }?.let { return@runCatching deviceLabel(it) }
+        }
+        if (!phoneMic) {
+            preferredBluetooth(inputs, null)?.let { return@runCatching deviceLabel(it) }
+        }
+        autoInputLabel()
+    }.getOrElse { autoInputLabel() }
+
+    private fun deviceLabel(device: AudioDeviceInfo): String {
+        val name = device.productName?.toString()?.takeIf { it.isNotBlank() } ?: return "Windows 기본 마이크"
+        return if (name.length <= 24) "$name 마이크" else name.take(23) + "… 마이크"
+    }
+
     private fun selectInputDevice(): Long {
         if (bluetoothRouteActive && Build.VERSION.SDK_INT >= 31) {
             val current = audioManager?.communicationDevice
@@ -418,11 +454,11 @@ class SpeechEngine(
         if (phoneMic) {
             restoreAudioRoute()
             selectPhoneInput()
-            onInputDeviceChanged("휴대전화 마이크")
+            onInputDeviceChanged(autoInputLabel())
             return 250L
         }
         if (bluetoothRouteActive) return 0L
-        onInputDeviceChanged("휴대전화 마이크")
+        onInputDeviceChanged(autoInputLabel())
         if (audioManager == null) return 0L
         return runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
