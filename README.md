@@ -2,7 +2,7 @@
 
 영어 학습 앱 **EngHub**의 Windows 데스크톱 버전입니다. 안드로이드 버전([hdlee73/EngHub](https://github.com/hdlee73/EngHub))과 같은 소스·같은 화면 구성·같은 아이콘을 쓰며, 안드로이드 버전 번호를 따라갑니다.
 
-- 앱 이름 / 버전: EngHub / 1.34.0 (`build.gradle.kts`의 `appVersion` 한 곳에서 관리)
+- 앱 이름 / 버전: EngHub / 1.34.2 (`build.gradle.kts`의 `appVersion` 한 곳에서 관리)
 - 만든이: 이현덕 (hdlee73@gmail.com)
 - 업데이트: 앱 정보 창에서 이 저장소의 최신 릴리스를 확인하고, 새 버전이 있으면 설치 파일(.msi)을 받아 바로 설치합니다. 릴리스 내용은 [RELEASE_NOTES.md](RELEASE_NOTES.md)에 있습니다.
 
